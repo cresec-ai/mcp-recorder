@@ -1,0 +1,57 @@
+name: publish
+
+# Publishes @cresec/mcp-recorder to npm when a v* tag is pushed. Release tags
+# are pushed by a maintainer. npm provenance ties the published tarball to
+# this repository, this workflow and the tagged commit.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # npm provenance (OIDC)
+
+# One group per tag: each version publishes once and none is dropped, which
+# a single shared group would allow (it keeps only one pending run).
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Tag, version and repository agree
+        # npm rejects a provenance publish whose package.json repository does
+        # not match the repository it runs in; fail here with a readable error
+        # instead. The tag must name the version being published.
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          cli_version="$(node -e "import('./dist/version.js').then(m => console.log(m.VERSION))")"
+          repo_url="$(node -p "require('./package.json').repository.url")"
+          [ "${GITHUB_REF_NAME}" = "v${version}" ] || { echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}"; exit 1; }
+          [ "${cli_version}" = "${version}" ] || { echo "dist/version.js says ${cli_version}, package.json says ${version}"; exit 1; }
+          case "${repo_url}" in
+            *"github.com/${GITHUB_REPOSITORY}.git"|*"github.com/${GITHUB_REPOSITORY}") ;;
+            *) echo "package.json repository.url (${repo_url}) does not name ${GITHUB_REPOSITORY}"; exit 1 ;;
+          esac
+      - name: Install dependencies
+        run: npm ci
+      - name: dist/ is committed and current
+        # prepublishOnly recompiles; a stale dist/ would make the tarball
+        # differ from the tagged commit.
+        run: npm run compile && git diff --exit-code --stat -- dist
+      - name: Test
+        run: npm test
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

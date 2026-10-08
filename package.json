@@ -1,0 +1,95 @@
+{
+  "name": "@cresec/mcp-recorder",
+  "version": "0.2.0",
+  "description": "The MCP gateway and evidence-chain leg of Cresec Governed Tools: wrap any MCP server in one config line, record every tool call into a tamper-evident, replayable, exportable local evidence store, and allow, hold or deny calls with a policy file.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "audit",
+    "agents",
+    "ai-security",
+    "evidence",
+    "tamper-evident",
+    "proxy",
+    "gateway",
+    "policy",
+    "governed-tools",
+    "cresec"
+  ],
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cresec-ai/mcp-recorder.git"
+  },
+  "homepage": "https://cresec.ai/recorder/?utm_source=npm",
+  "bugs": {
+    "url": "https://github.com/cresec-ai/mcp-recorder/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mcp-recorder": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "receiver",
+    "src",
+    "docs/agent-guidance.md",
+    "docs/event-schema.md",
+    "docs/first-run.md",
+    "docs/gateway.md",
+    "docs/install.md",
+    "docs/policy.md",
+    "docs/policy-schema.json",
+    "docs/reference.md",
+    "docs/sink.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "node --import tsx bench/latency.ts",
+    "bench:gateway": "node --import tsx bench/latency.ts --gateway",
+    "bench:boundary": "node --import tsx bench/boundary.ts",
+    "demo": "tsx demo/run.ts",
+    "demo:sample": "node --import tsx demo/public-evidence.ts",
+    "receiver": "tsx receiver/main.ts",
+    "prepublishOnly": "npm run compile && npm test"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.1.0",
+    "@noble/hashes": "^1.5.0",
+    "yaml": "^2.9.1",
+    "yazl": "^2.5.1"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.0",
+    "@types/yazl": "^2.4.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.12.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^2.1.0"
+  }
+}

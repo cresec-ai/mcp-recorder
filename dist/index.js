@@ -1,0 +1,59 @@
+/**
+ * @cresec/mcp-recorder — public API.
+ *
+ * Everything the CLI wires together is importable as a library: schema,
+ * hashing/signing primitives, stores, redaction, the recorder, both proxies,
+ * verification, blast-radius query, replay rendering/serving, and bundle
+ * export.
+ */
+/* schema + module contracts */
+export * from './schema/events.js';
+export * from './types.js';
+/* hashing / chain primitives */
+export { canonicalJson, sha256Hex, sha256Ref, GENESIS_HASH, computeHash, makeRecord, signedPayload, } from './chain/hash.js';
+/* keys + signing */
+export { Signer, publicKeyPem, publicKeyHexFromPem } from './chain/keys.js';
+/* evidence stores */
+export { openStore, SqliteStore, JsonlStore, isSqliteAvailable } from './store/index.js';
+/* redaction */
+export { Redactor, DEFAULT_POLICY, looksSecret, scrubArgv, scrubToolArguments, } from './redact/redactor.js';
+/* capture */
+export { Recorder } from './capture/recorder.js';
+/* proxies */
+export { runStdioProxy } from './proxy/stdio.js';
+export { runHttpProxy } from './proxy/http.js';
+/* verification */
+export { verifyStore, verifyRecords } from './verify/verify.js';
+/* blast-radius query */
+export { queryStore } from './query/touched.js';
+/* replay */
+export { renderTimelineHtml, MAX_EMBED_EVENTS } from './replay/render.js';
+export { serveUi } from './replay/serve.js';
+/* export */
+export { exportBundle, BUNDLE_FILES } from './export/bundle.js';
+/* policy.yaml v1: types, schema, validation, loading, engine, Rego compiler */
+export { DEFAULTS as POLICY_DEFAULTS, ID_PATTERN as POLICY_ID_PATTERN, LIMITS as POLICY_LIMITS, REGEX_VALUE_CAP, autoRuleId, normalizePolicy, } from './policy/types.js';
+export { POLICY_SCHEMA, POLICY_SCHEMA_ID } from './policy/schema.js';
+export { validateAgainstSchema } from './policy/jsonschema.js';
+export { checkGlob, checkRe2Subset, formatPolicyErrors, validatePolicyObject } from './policy/validate.js';
+export { checkCatastrophicShape } from './policy/redos.js';
+export { REGEX_DEADLINE_MS, REGEX_STARTUP_MS, RegexGuardError, configureRegexGuard, regexGuardState, resetRegexGuard, setRegexGuardDiag, warmRegexGuard, } from './policy/regex-guard.js';
+export { PolicyLoadError, PolicyValidationError, findNonJsonValue, loadPolicyFile, parsePolicyText, sourceForPath, } from './policy/load.js';
+export { compileGlob, globMatch, globToRegExp } from './policy/glob.js';
+export { evaluateEgress, evaluateMcp, getPath, ruleLabel } from './policy/engine.js';
+export { bundleFileOrder, compileToRego, policyRevision, renderEgressModule, renderMcpModule, } from './policy/rego.js';
+/* gateway primitives (record --policy): boundary filter, injection markers, hold store */
+export { BOUNDARY_SECRET_FAMILIES, FAIL_CLOSED_REFUSAL_GUIDANCE, INJECTION_MARKER, INJECTION_PATTERNS, MARKER_HASH_HEX, MAX_SECRET_REFS as BOUNDARY_MAX_SECRET_REFS, POLICY_REFUSAL_GUIDANCE, applyBoundary, blockedText, boundarySecretPatterns, deniedText, findInjectionSpans, findSecretSpans, matchSpans, mergeSpans, oversizeBlockedText, redactSpans, synthesizeDeniedResult, DEFAULT_POLL_MS as HOLD_DEFAULT_POLL_MS, HoldError, HoldStore, } from './gateway/index.js';
+/* evidence sink (the SENDER half): wire protocol, client, shipper, spawn */
+export { BACKOFF_BASE_MS as SINK_BACKOFF_BASE_MS, BACKOFF_CAP_MS as SINK_BACKOFF_CAP_MS, GZIP_THRESHOLD_BYTES as SINK_GZIP_THRESHOLD_BYTES, HEALTH_PATH as SINK_HEALTH_PATH, HEARTBEAT_INTERVAL_S as SINK_HEARTBEAT_INTERVAL_S, SENDER_MAX_BYTES as SINK_SENDER_MAX_BYTES, SENDER_MAX_RECORDS as SINK_SENDER_MAX_RECORDS, SINK_HEADERS, SINK_PROTOCOL, SINK_SIGNATURE_DOMAIN, backoffMs as sinkBackoffMs, chainIdFromGenesisRecord, cursorPath as sinkCursorPath, parseCursor as parseSinkCursor, recordsPath as sinkRecordsPath, sinkSignedPayload, } from './sink/protocol.js';
+export { normalizeSinkUrl, resolveSinkConfig } from './sink/config.js';
+export { SinkClient } from './sink/client.js';
+export { agentFor as sinkAgentFor, noProxyMatches, proxyUrlFor, sinkFetch } from './sink/http.js';
+export { collectBatch, runShipper, signaturesInRange } from './sink/shipper.js';
+export { SELF_CHECK_MAX_SIGS_PER_WINDOW, SELF_CHECK_WINDOW, advanceSelfCheck, newSelfCheck, } from './sink/selfcheck.js';
+export { acquireShipLock, readCursorCache, readShipStatus, shipperLooksAlive, writeCursorCache, writeShipStatus, } from './sink/state.js';
+export { cliEntryPoint, ensureShipper } from './sink/spawn.js';
+/* config + version */
+export { resolveConfig } from './config.js';
+export { VERSION } from './version.js';
+//# sourceMappingURL=index.js.map

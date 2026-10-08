@@ -1,0 +1,129 @@
+/**
+ * Shared "spin up a fail-open Recorder for one CLI invocation" logic. Used by
+ * `record`/`http` (src/cli.ts) and `hook` (src/hook/run.ts) — moved out of
+ * cli.ts into its own module so `hook` can reuse it without an import cycle
+ * (cli.ts -> src/hook/run.ts -> cli.ts).
+ *
+ * ANY init failure is fail-open: warn (via the caller-supplied `diag`) and
+ * degrade — store/signing failures retain the delivery journal for retry.
+ * If the journal itself is unavailable, stderr exposes the coverage gap. This is also where the data directory gets created, so a bad
+ * --data-dir/MCP_RECORDER_DATA_DIR degrades gracefully here rather than
+ * throwing before the caller can do its own work (forward traffic for
+ * record/http; still answer the hook's stdin for `hook`).
+ */
+import { DurableDelivery } from './spool.js';
+import { Recorder } from './recorder.js';
+import { Signer } from '../chain/keys.js';
+import { ensureDataDir } from '../config.js';
+import { openStore, openStoreReadOnly } from '../store/index.js';
+import { Redactor } from '../redact/redactor.js';
+import { resolveSinkConfig } from '../sink/config.js';
+import { ensureShipper } from '../sink/spawn.js';
+/**
+ * `readOnly: true` (used by the inspection commands — verify/query/sessions/
+ * ui/export) resolves the backend without ever creating a store file as a
+ * side effect of merely looking: on a data dir where nothing has recorded
+ * yet, it returns an empty store instead of the write path's "create
+ * whichever backend is available" behavior (see src/store/index.ts).
+ */
+export function openConfiguredStore(config, opts = {}) {
+    const storeOpts = config.storeBackend !== undefined
+        ? { dataDir: config.dataDir, backend: config.storeBackend }
+        : { dataDir: config.dataDir };
+    return opts.readOnly === true ? openStoreReadOnly(storeOpts) : openStore(storeOpts);
+}
+/** Wrap a recorder so the caller learns the session id of the first event. */
+function tapSessionId(recorder) {
+    let sessionId;
+    const wrapped = {
+        record(event) {
+            if (sessionId === undefined)
+                sessionId = event.session_id;
+            recorder.record(event);
+        },
+        flush: () => recorder.flush(),
+        close: () => recorder.close(),
+        stats: () => recorder.stats(),
+    };
+    return { recorder: wrapped, sessionId: () => sessionId };
+}
+/**
+ * Build redactor/store/signer/recorder for one CLI invocation. `diag` is the
+ * caller's own stderr diagnostic writer (record/http and hook each keep
+ * their own, matching their own message prefix conventions).
+ *
+ * If (and only if) a sink is configured, this ALSO makes sure a shipper
+ * process exists for the data dir. That is a `statSync` plus, at most, a
+ * detached spawn that is immediately `unref`'d — no awaiting, no I/O on the
+ * forwarding path, and a failure is a silent no-op. The sink never runs in
+ * this process.
+ */
+export async function setupProxyRecording(config, diag, opts = {}) {
+    const redactor = new Redactor({ mode: config.redactMode });
+    let store = null;
+    let signer = null;
+    if (config.disabled) {
+        diag('MCP_RECORDER_DISABLE=1 — recording disabled, pure passthrough');
+    }
+    else {
+        try {
+            ensureDataDir(config.dataDir);
+            store = openConfiguredStore(config);
+        }
+        catch (cause) {
+            const msg = cause instanceof Error ? cause.message : String(cause);
+            diag(`evidence store init failed; delivery spool will retry (traffic unaffected): ${msg}`);
+            try {
+                store?.close();
+            }
+            catch {
+                /* fail-open */
+            }
+            store = null;
+        }
+        if (store !== null) {
+            try {
+                signer = await Signer.load(config.dataDir);
+            }
+            catch (cause) {
+                const msg = cause instanceof Error ? cause.message : String(cause);
+                diag(`recording without head signatures (identity key init failed): ${msg}`);
+                signer = null;
+            }
+        }
+    }
+    if (store !== null) {
+        // Fail-open by construction: resolveSinkConfig never throws, ensureShipper
+        // never throws, and neither one can delay or deny a single byte of the
+        // traffic being forwarded.
+        const { sink, warnings } = resolveSinkConfig({
+            ...(opts.flags !== undefined ? { flags: opts.flags } : {}),
+            env: process.env,
+        });
+        // `hook` is a fresh process per tool call, so an advisory that repeats on
+        // every invocation is noise in the agent's own stderr. A misconfiguration
+        // that actually DISABLED the sink is still said out loud there.
+        if (sink === undefined || opts.surface !== 'hook') {
+            for (const w of warnings)
+                diag(w);
+        }
+        if (sink !== undefined) {
+            ensureShipper({ config, sink, surface: opts.surface ?? 'record' });
+        }
+    }
+    const delivery = config.disabled ? undefined : new DurableDelivery({
+        dataDir: config.dataDir, store, signer, openStore: () => openConfiguredStore(config), warn: diag,
+    });
+    // Replay/recovery is background work, never a prerequisite for forwarding.
+    void delivery?.start(false);
+    const inner = new Recorder({ store, signer, ...(delivery === undefined ? {} : { delivery }) });
+    const { recorder, sessionId } = tapSessionId(inner);
+    return {
+        recorder,
+        redactor,
+        sessionId,
+        storePath: store?.path,
+        stats: () => inner.stats(),
+    };
+}
+//# sourceMappingURL=setup.js.map

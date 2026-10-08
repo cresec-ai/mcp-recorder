@@ -1,0 +1,736 @@
+# What this is, and what it does to your setup
+
+`@cresec/mcp-recorder` records what your agent's MCP tools actually did, into a
+local, tamper-evident log, and — with a policy file — can allow, hold or deny
+those calls before they run. This page is for deciding whether to run it, and
+for knowing what changed once you have.
+
+It is the MCP gateway and evidence-chain leg of Cresec Governed Tools: the part
+that sits on the agent's MCP tool-call path and produces the signed record.
+Which named person is acting, through which tool version, with which per-user
+credential, is available only with a control plane behind it:
+`identity.actor` carries the person and the tool version, decoded from the
+identity JWT given with `--identity-jwt`
+([docs/event-schema.md](event-schema.md), "Actor claim";
+`test/identity.test.ts`), and `credentials[].broker: { kind: remote }` fetches
+that person's own token per call (`src/broker/wire.ts`,
+`src/broker/remote.ts`). Both need a control plane to mint the JWT and hold the
+token; `test/e2e/` covers both against a test control plane.
+
+It does not repeat [docs/install.md](install.md), which is the installation
+walkthrough for each client, or the quickstart in [README.md](../README.md).
+Read those for the how; read this for the what and the cost.
+
+**About the transcripts on this page.** Commands are written as
+`mcp-recorder ...`, the installed binary name. Where a tool call had to be
+driven without a real client, a short script speaking JSON-RPC on stdin stood
+in for one, and the blocks below say so. Output is trimmed only where the text
+says so, and paths are shortened.
+
+## What problem does it solve?
+
+An agent with MCP tools reads and writes real systems: your files, your
+repositories, your mailbox, your ticket tracker. When something goes wrong — a
+credential that appears in a tool result, an instruction hidden in a document
+the agent read, a write nobody meant to authorise — the tool calls themselves
+are usually gone, and what remains is a chat transcript nobody can attest to.
+This records each of those calls as it happens, into a hash-chained local log
+with payloads hashed rather than stored, so afterwards you can reconstruct
+what the agent saw and did, and demonstrate that the log was not edited.
+
+The record is the product. Started **without** an identity JWT, this log does
+not say which named person was behind the call or through which tool version —
+the audit line reads as an OS user on a hostname, not as a named person using a
+named tool version. Started **with** one (`--identity-jwt`), every event also
+carries `identity.actor` — `user`, `tool`, `host`, `run_as`, exactly the
+control plane's shape — and `identity.actor_verified`, which is `false` when
+the signature was never checked
+([docs/event-schema.md](event-schema.md), "Actor claim (optional, additive)").
+The token comes from the control plane's identity gate, so that half depends
+on it.
+
+## What is running once it is installed?
+
+One extra process per wrapped server. Your MCP client launches
+`mcp-recorder record -- <your server command>` instead of the server; the
+recorder spawns the server as its child and sits between the two pipes. The
+client's view does not change: in record mode the proxy forwards the exact
+bytes in both directions and taps a copy.
+
+The repository's transparency tests assert this:
+
+```
+$ npx vitest run test/stdio-proxy.test.ts -t "forwards bytes unchanged"
+$ npx vitest run test/stdio-proxy.test.ts -t "every byte the client sent"
+```
+
+The second is the one that matters. It runs the same deliberately nasty
+stream twice — once straight into the server, once through the proxy — and
+compares the raw buffers in both directions. The stream carries CRLF framing,
+a bare CRLF, non-JSON noise, a JSON-RPC integer past 2^53, an unterminated
+trailing line, and, in each direction, a single line larger than the proxy's
+own 32 MiB tap cap. Every byte matches.
+
+Nothing is sent anywhere unless you opt in. The ways the recorder opens a
+socket are:
+
+- `src/replay/serve.ts`, the local replay UI (`ui` without `--out`), and
+  `src/proxy/http.ts`, the `http` subcommand forwarding to the target you name
+  on the command line — both servers this tool runs locally on your behalf;
+- `src/sink/http.ts`, which replicates sealed records to an evidence sink, and
+  only when `MCP_RECORDER_SINK` is set — with it unset there is no shipper and
+  no connection ([docs/sink.md](sink.md));
+- `src/broker/remote.ts`, a client for the control plane's
+  `POST /v1/broker/user-token`, wired by `src/broker/wire.ts` behind
+  `credentials[].broker: { kind: remote }` — `policy validate` requires that
+  credential's provider to be one of the control plane's connectors — and
+  covered by `test/e2e/http-gateway.e2e.test.ts`;
+- the credential sources in `src/broker/sources.ts` (`github-app`, `aws-sts`,
+  `vault`, `clickup`), which reach their provider through the same transport,
+  and only when a policy's `credentials` section declares one; they carry no
+  evidence.
+
+Evidence leaves the machine only when you run `export` or set the sink
+variable.
+
+### Where the evidence lands
+
+The default data directory is `~/.mcp-recorder` (override with `--data-dir` or
+`MCP_RECORDER_DATA_DIR`). A session recorded into a fresh directory leaves
+three files:
+
+```
+$ ls -l data
+-rw-r--r-- 1 root root 45056 Sep 17 05:38 evidence.db
+-rw------- 1 root root    65 Sep 17 05:38 identity.key
+-rw-r--r-- 1 root root    65 Sep 17 05:38 identity.pub
+```
+
+`evidence.db` is the append-only hash-chained event log (sqlite by default;
+the jsonl backend writes `evidence.jsonl` plus `signatures.jsonl` instead).
+`identity.key` is the local ed25519 signing key, generated on first run, and
+`identity.pub` is the public half that `verify` pins to. Treat `identity.key`
+like an SSH key. [docs/install.md](install.md#where-the-data-lives-and-whats-in-it)
+covers permissions and the multiple-servers-one-directory case.
+
+Two subdirectories appear only when the relevant feature is in use:
+`hook-pending/` and `hook-sessions/` for the Claude Code hook tap, and
+`holds/` for gateway mode.
+
+No readable payload reaches any of it. Each string leaf and each object key is
+replaced by `sha256:<hex>` plus its length before anything is written. After
+recording 200 tool calls whose arguments contain distinctive strings, none of
+those strings appears in the store:
+
+```
+$ for s in 'SELECT id, email' 'srv/reports' 'quarterly reconciliation'; do
+>   printf '%-26s %s\n' "$s" "$(grep -c -- "$s" evidence.jsonl)"; done
+SELECT id, email           0
+srv/reports                0
+quarterly reconciliation   0
+```
+
+## What do you get out of a recorded session?
+
+These run against the data directory left by `npm run demo` (a scripted
+prompt-injection exfiltration; no model, no network, the credential and the
+leak are planted), copied to a shorter path so the output fits.
+
+What ran:
+
+```
+$ mcp-recorder sessions --data-dir data
+SESSION   STARTED                   ENDED                     SERVER      EVENTS  TOOL_CALLS  ERRORS  SERVERS  DECISIONS  LAST_EVENT
+35393152  2026-09-17T05:26:14.634Z  2026-09-17T05:26:15.571Z  corp-notes  9       4           0       1        0          2026-09-17T05:26:15.571Z
+```
+
+`DECISIONS` counts enforcement decisions: gateway `policy_decision` events
+and hook denies alike — see
+[Known gaps](#known-gaps-in-what-this-reports) for how the two are recorded.
+
+Whether the record is intact:
+
+```
+$ mcp-recorder verify --data-dir data
+verify store data/evidence.db (sqlite)
+pinned signer: ed25519 cd06d0f0f32fe6d1… (data/identity.pub)
+PASS — chain intact: 9 event(s), head seq 9
+signed head: seq 9 by ed25519 cd06d0f0f32fe6d1… at 2026-09-17T05:26:15.572Z
+```
+
+Blast radius for a value you already hold — the planted credential, hashed and
+looked up:
+
+```
+$ mcp-recorder query 'sk-demo-EXFILTRATION-c4n4ry-9f3a7b2e' --data-dir data
+TIMESTAMP                 KIND       NAME       SESSION   MATCHED_ON  PATH
+2026-09-17T05:26:15.544Z  tool_call  read_file  35393152  ref         $.result.content[0].text.secret_refs[0]
+2026-09-17T05:26:15.547Z  tool_call  http_post  35393152  ref         $.args.body
+
+2 matches across 1 sessions
+```
+
+The credential was read out of a file and then appeared in the body of an
+outbound POST. Neither value is stored; both were found by hash. A `query`
+miss is not proof of absence — [docs/reference.md](reference.md#security-model-the-honest-version)
+sets out which shapes are findable.
+
+`verify` fails loudly on an edit. One altered field — a tool name — in one
+event of a 204-event chain, with everything else left alone:
+
+```
+$ mcp-recorder verify --data-dir tampered
+verify store tampered/evidence.jsonl (jsonl)
+pinned signer: ed25519 7c530b57a19a3f31… (tampered/identity.pub)
+FAIL — evidence does NOT verify: 204 event(s) checked
+signed head: seq 204 by ed25519 7c530b57a19a3f31… at 2026-09-17T05:27:14.051Z
+
+TYPE                      SEQ  DETAIL
+hash_mismatch             6    stored hash 626c07b5… != recomputed 889ba67a… — the event was altered
+signature_chain_mismatch  6    a valid signature attests hash 626c07b5… at seq 6, but the chain recomputes to 889ba67a…
+```
+
+(exit code 1; the hashes are trimmed to their first four bytes for width.)
+
+`export` writes a bundle a stranger can check with bare Node and no install:
+
+```
+$ mcp-recorder export --data-dir data --dir bundle
+[mcp-recorder] exported 9 event(s) (seq 1..9), head 99d06215a1971643… signed by ed25519 cd06d0f0f32fe6d1…
+[mcp-recorder] bundle dir: bundle
+[mcp-recorder] verify anywhere with: node verify.cjs (inside the bundle)
+$ ls -l bundle
+-rw-r--r-- 1 root root   479 Sep 17 05:38 README.txt
+-rw-r--r-- 1 root root 15903 Sep 17 05:38 events.jsonl
+-rw-r--r-- 1 root root   920 Sep 17 05:38 manifest.json
+-rw-r--r-- 1 root root   113 Sep 17 05:38 public_key.pem
+-rw-r--r-- 1 root root 10534 Sep 17 05:38 verify.cjs
+```
+
+**The limit is in the tool's own output, and it matters.** Running the
+bundle's verifier without a key obtained out of band proves internal
+consistency and nothing more:
+
+```
+$ node verify.cjs
+PASS: evidence bundle verified
+  events     : 9 (seq 1..9)
+  signed by  : ed25519 cd06d0f0f32fe6d1cba6c9f54832e8186a52a7504fc15c543d0f520afb99b781 at 2026-09-17T05:38:08.820Z
+  key check  : NOT independently verified - the key came from this bundle
+               itself (public_key.pem / manifest.json), which an attacker
+               who forged the whole bundle controls too. Re-run with
+               --public-key <hex|path> using a key you obtained out of band
+               (e.g. from the operator directly) for real assurance.
+```
+
+(trimmed: the base/head hash lines and the unsigned-metadata block are
+omitted.) For real third-party assurance the verifier needs `--public-key`,
+pinned to a key the recipient got from the operator directly rather than from
+the artefact being checked. `verify --bundle` says the same thing about its
+own default pin.
+
+There is also a replay timeline — see, act, effect, with identity context on
+each event — served locally or written to a file:
+
+```
+$ mcp-recorder ui --data-dir data --out timeline.html --no-open
+[mcp-recorder] wrote replay page to timeline.html
+```
+
+One sharp edge: a `--data-dir` pointing at a store that does not exist
+produces a page that looks fine and is empty, with no warning and exit code 0.
+
+```
+$ mcp-recorder ui --data-dir no-such-store --out empty.html --no-open
+[mcp-recorder] wrote replay page to empty.html
+$ echo $?
+0
+$ grep -o 'chain intact[^<]*' empty.html | head -1
+chain intact, 0 events, head unsigned
+```
+
+The green tick is truthful about a chain of zero events, but it reads as
+reassurance. Omitting `--data-dir` altogether reads the default
+`~/.mcp-recorder`, and the command says so on stderr. Check the event count and
+the store path before you conclude anything from a replay page.
+
+## Where can it see your agent's traffic?
+
+There are three vantage points. They are not equivalent, and the difference
+decides whether this tool is useful to you at all.
+[What the recorder can and cannot see](install.md#connectors-what-the-recorder-can-and-cannot-see)
+and [docs/hooks.md](hooks.md) have the detail; this table is the short form.
+
+| Vantage point | How it attaches | What it can see | What it can do about it |
+| --- | --- | --- | --- |
+| `record` — stdio proxy | your client launches the server through it, one config line | every JSON-RPC message in both directions, for that one local server | nothing in record mode; allow / hold / deny per tool, and a boundary filter over results, in gateway mode |
+| `hook` — Claude Code PreToolUse / PostToolUse / PostToolUseFailure | entries in a Claude Code settings file | per call: tool name, the full input, and the response or the error string — for every `mcp__*` tool, **including Anthropic-hosted connectors** | deny a call before it runs, via `--policy` |
+| `http` — HTTP-transport proxy | you point the client at the proxy instead of the server | the HTTP MCP traffic it proxies | gateway mode with `--policy` (`src/proxy/http-gateway.ts`): every POST is gated whatever its content-type claims, a non-JSON POST body is refused 400 and never forwarded, and the SSE boundary path fails closed |
+
+A fourth arrangement is really the first one in disguise: `setup --bridge`
+replaces a remote connector with a local `mcp-remote` process, which the
+recorder then wraps like any other stdio server. It works only for vendors
+with a public MCP endpoint, and the user has to re-authorise through the
+bridge. See [docs/install.md](install.md#bridge-a-remote-mcp-server).
+
+### The hosted-connector gap, stated plainly
+
+For the connectors Claude ships with — ClickUp, GitHub, Gmail, Google Drive,
+Slack and the rest — the call to the vendor is made from Anthropic's
+infrastructure, on every surface. No local proxy of ours sits on that hop. The
+Claude Code hook is the only third-party tap this project has found on those
+connectors, and it covers Claude Code only: the CLI, the IDE extension, the
+Desktop Code tab, cloud sessions and the Agent SDK. On claude.ai web and
+Desktop chat the only customer-side feeds are Anthropic's own, and they are
+Enterprise-gated. Cowork should be treated as **not** covered by the hook:
+community reports say hooks do not fire there.
+
+Feeding the hook the documented PreToolUse and PostToolUse JSON for a
+connector-shaped tool records it, including a secret embedded in a longer
+argument string:
+
+```
+$ mcp-recorder hook --data-dir data-hook < pre.json     # exit 0, no output = allow
+$ mcp-recorder hook --data-dir data-hook < post.json
+$ mcp-recorder sessions --data-dir data-hook
+SESSION   STARTED                   ENDED   SERVER       EVENTS  TOOL_CALLS  ERRORS  SERVERS  DECISIONS  LAST_EVENT
+11111111  2026-09-17T05:29:09.526Z  (open)  claude-code  3       1           0       1        0          2026-09-17T05:29:14.564Z
+
+$ mcp-recorder query 'AKIAIOSFODNN7EXAMPLE' --data-dir data-hook
+TIMESTAMP                 KIND       NAME          SESSION   MATCHED_ON  PATH
+2026-09-17T05:29:09.526Z  tool_call  send_message  11111111  ref         $.args.body.secret_refs[0]
+2026-09-17T05:29:14.564Z  tool_call  send_message  11111111  ref         $.args.body.secret_refs[0]
+
+2 matches across 1 sessions
+```
+
+A deny rule fires against the same payload:
+
+```
+$ mcp-recorder hook --data-dir data-hookdeny --policy hook-policy.json < pre.json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"mcp-recorder policy: outbound mail from agents needs a human"}}
+```
+
+## Hook enforcement on hosted connectors
+
+A hook deny rule matches the full `tool_name` Claude Code hands the hook,
+`mcp__<server>__<tool>`, and the `<server>` segment is the platform's to
+choose. In a cloud session the MCP config file can be keyed by UUID while the
+tool names use either the same UUID or a friendly name (`mcp__ClickUp__…`); on
+a local machine there is no config file at all, and the same connector can
+appear as `mcp__claude_ai_ClickUp__…` in the WSL CLI and under a UUID in the
+Desktop "Code" tab.
+
+The hook resolves a segment to its vendor origin in two ways: by config key
+(route 1) and, when no key matches, by the one entry whose `tools[]` declares
+the tool being called (route 2). A resolved call is recorded with
+`server.url` (for example `https://mcp.clickup.com/mcp`) and gets a deny-only
+policy alias `mcp__<host>__<tool>`. With a config whose keys match no segment,
+route 2 still resolves the friendly name, and a host-alias-only deny rule
+fires; with no config file at all the same call is allowed and carries no
+`server.url`:
+
+```
+$ MCP_RECORDER_MCP_CONFIG=mcp-config-uuid-keys.json \
+>   mcp-recorder hook --data-dir data-route2 --policy alias-only-policy.json < pre-clickup.json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"mcp-recorder policy: host-alias-only rule: this can only match if the connector resolved"}}
+
+$ MCP_RECORDER_MCP_CONFIG=no-such-config.json \
+>   mcp-recorder hook --data-dir data-control --policy alias-only-policy.json < pre-clickup.json
+$ echo $?
+0
+```
+
+Nothing on stdout and exit 0 is how the hook says "allow".
+
+**None of that resolution happens on a laptop.** A local session has no
+`/tmp/mcp-config-*.json` and no claude.ai connector in any `mcpServers` map,
+so `server.url` is never recorded locally and a host-alias rule can never
+fire. If a deny rule against a hosted connector has to hold, anchor it to the
+tool with the segment left open (`^mcp__.*__clickup_filter_tasks$`): it needs
+no resolution at all, and locally it is the only thing that works.
+[docs/hooks.md](hooks.md#write-deny-rules-against-the-tool-not-the-server-segment)
+gives the shape, and `mcp-recorder doctor` fails a rule anchored to one
+segment.
+
+## What are the two modes, and why is one fail-open and the other fail-closed?
+
+**Record mode** observes. It is the default, and it forwards bytes unchanged.
+
+**Gateway mode** enforces. It is `record --policy <file>`, and it adds
+per-tool allow / hold / deny, plus a boundary filter over tool results that
+redacts secret-shaped values and flags or blocks prompt-injection markers.
+Its own documentation is [docs/gateway.md](gateway.md) and
+[docs/policy.md](policy.md).
+
+The split in failure behaviour is deliberate and it runs in opposite
+directions:
+
+| | Record mode | Gateway mode |
+| --- | --- | --- |
+| Store cannot be written | recording is disabled, traffic continues | recording is disabled, allow and deny rules still decide normally |
+| A hold file cannot be written | not applicable | that call is **denied** |
+| Policy cannot be read | not applicable | exits 2 before the server is spawned |
+| A message cannot be parsed | forwarded unchanged | refused, with a JSON-RPC error to the client |
+| Guiding rule | never break the agent | never fail into permitting |
+
+The first two rows are one directory failure seen twice, and the distinction
+between them is the whole design: a store that cannot be written never turns
+into a deny, but a decision that cannot be *reached* — a hold nobody can
+record, so nobody can approve — does.
+
+The reasoning is that a recorder that can ground the aircraft is worse than
+no recorder — people turn it off. An enforcement point that
+silently permits what it could not evaluate is worse than no enforcement point
+— people believe it. So recording drops events rather than blocking traffic,
+and enforcement refuses calls rather than waving them through.
+
+All three cases below use the same broken data directory (a path whose parent
+is a regular file, so the store cannot be created).
+
+Record mode keeps going, and says how much it lost. (A stand-in client script
+sends one `initialize` and one `tools/call`, and prints what came back as
+`CLIENT RECEIVED`; everything else is the recorder's own stderr.)
+
+```
+$ mcp-recorder record --data-dir blocker/nope -- node echo-server.cjs
+[mcp-recorder] recording disabled (init failed, traffic unaffected): ENOTDIR: not a directory, mkdir 'blocker/nope'
+CLIENT RECEIVED: {"content":[{"type":"text","text":"{\"query\":\"srv/reports FROM customers WHERE region = 'emea' -- call 1\",\"path\":\"/srv/reports/1.csv\",\"note\":\"quarterly reconciliation batch 1\",\"filler\":\"xxxxxxxxxx\"}"}]}
+[mcp-recorder] session 6d2fa2ac recorded 0 events (5 dropped) -> (recording disabled)
+```
+
+The tool call succeeded. Five events were dropped, and the count is reported —
+it is also carried in the session's `session_end` event, so the gap is itself
+part of the record when the store is working again.
+
+Gateway mode, same directory, same stand-in client, and a policy that holds
+the call for approval:
+
+```
+$ mcp-recorder record --policy hold-policy.yaml --data-dir blocker/nope -- node echo-server.cjs
+[mcp-recorder] recording disabled (init failed, traffic unaffected): ENOTDIR: not a directory, mkdir 'blocker/nope'
+[mcp-recorder] gateway: policy hold-demo (1 rule)
+[mcp-recorder] gateway: cannot write hold for tools/call "echo" (ENOTDIR: not a directory, mkdir 'blocker/nope/holds'); denying
+[mcp-recorder] gateway: denied tools/call "echo" (rule echo-needs-a-human)
+CLIENT RECEIVED: {"content":[{"type":"text","text":"mcp-recorder gateway: tools/call \"echo\" denied by policy rule \"echo-needs-a-human\": hold unavailable\nThe gateway could not reach a policy decision, so it refused this call rather than allow it unchecked. …"}],"isError":true}
+[mcp-recorder] session 04626e11 recorded 0 events (6 dropped) -> (recording disabled)
+```
+
+(trimmed: the tail of the guidance clause.) The deny is not the store failing.
+The same broken directory with a policy whose rule is `allow` lets the call
+through:
+
+```
+$ mcp-recorder record --policy allow-policy.yaml --data-dir blocker/nope -- node echo-server.cjs
+[mcp-recorder] recording disabled (init failed, traffic unaffected): ENOTDIR: not a directory, mkdir 'blocker/nope'
+[mcp-recorder] gateway: policy allow-demo (1 rule)
+CLIENT RECEIVED: {"content":[{"type":"text","text":"{\"query\":\"srv/reports FROM customers WHERE region = 'emea' -- call 1\",\"path\":\"/srv/reports/1.csv\",\"note\":\"quarterly reconciliation batch 1\",\"filler\":\"xxxxxxxxxx\"}"}]}
+[mcp-recorder] session 6c943010 recorded 0 events (5 dropped) -> (recording disabled)
+```
+
+Recording failed open in all three runs — same first line every time. What
+differs is whether the enforcement decision could be reached at all.
+
+A policy that cannot be read is refused before the server starts, so a typo
+cannot become an allow-everything gateway:
+
+```
+$ mcp-recorder record --policy does-not-exist.yaml -- node echo-server.cjs
+[mcp-recorder] error: policy: cannot read policy file does-not-exist.yaml: ENOENT: no such file or directory, open 'does-not-exist.yaml'
+$ echo $?
+2
+```
+
+A policy file can be checked before it is used, and compiled for an external
+policy engine:
+
+```
+$ mcp-recorder policy validate hold-policy.yaml
+hold-policy.yaml: valid (1 mcp rules, 0 egress rules)
+$ echo $?
+0
+$ mcp-recorder policy compile hold-policy.yaml | head -3
+package cresec.mcp
+
+import rego.v1
+```
+
+Validation is strict, and says where it failed. A `timeout` key on the rule,
+instead of `mcp.hold.timeout_ms`, is caught before the gateway ever runs:
+
+```
+$ mcp-recorder policy validate hold-policy.yaml    # a draft with the wrong key
+hold-policy.yaml: invalid
+  /mcp/rules/0/timeout: unknown property "timeout"
+$ echo $?
+1
+```
+
+What gateway mode does when it works, on the same scripted incident as the
+demo above: the injection marker in the poisoned note was flagged, the
+planted credential was redacted out of the `read_file` result before the agent
+saw it, the outbound POST was denied by rule, and all of it was sealed into
+the chain (trimmed to the agent's own lines):
+
+```
+$ npm run demo -- --policy docs/examples/policy.demo.yaml
+    │ [mcp-recorder] gateway: policy demo (1 rule)
+    │ agent: read vendor-onboarding.md
+    │ agent: following injected instructions…
+    │ [mcp-recorder] gateway: redacted tool result of tools/call "read_file" (1 secret-shaped, 0 injection marker(s))
+    │ agent: read secrets.env — the gateway redacted the credential before it reached me (exfiltrating the placeholder anyway)
+    │ [mcp-recorder] gateway: denied tools/call "http_post" (rule no-exfil)
+    │ agent: http_post to https://vendor-verify.example.com/collect was DENIED by the gateway: mcp-recorder gateway: tools/call "http_post" denied by policy rule "no-exfil": outbound HTTP from agents is not allowed
+    │ [mcp-recorder] session ea1b1750 recorded 10 events (0 dropped)
+    │ PASS — chain intact: 10 event(s), head seq 10
+```
+
+Read `agent: following injected instructions…` as the warning it is. The
+demo policy sets `boundary.injection: flag`, and flag means flag: the
+recorded boundary result for that note is `injection_found: 1`,
+`action: "flag"`, `decision: "allow"`, and the agent received the injected
+text and acted on it. What stopped the exfiltration was the separate
+`no-exfil` deny rule, which happened to cover the vector this fixture uses.
+See [Known gaps](#known-gaps-in-what-this-reports).
+
+A `hold` blocks that one call and nothing else until a human decides. The
+call is held, `holds` lists it, `approve` releases it, and the original
+request is then forwarded:
+
+```
+$ mcp-recorder holds --data-dir data-hold
+ID        AGE  SERVER       TOOL  RULE                TIMEOUT
+3fd5ba31  3s   echo-server  echo  echo-needs-a-human  56s
+$ mcp-recorder approve 3fd5ba31 --data-dir data-hold
+approved 3fd5ba31-ac02-42c2-987a-370bf5290692: echo on echo-server (rule echo-needs-a-human) by root
+```
+
+and, in the gateway's own stderr and at the stand-in client:
+
+```
+[mcp-recorder] gateway: holding tools/call "echo" (rule echo-needs-a-human) as 3fd5ba31-ac02-42c2-987a-370bf5290692 — mcp-recorder approve|deny 3fd5ba31-ac02-42c2-987a-370bf5290692
+[mcp-recorder] gateway: hold 3fd5ba31-ac02-42c2-987a-370bf5290692 approved; forwarding tools/call "echo" after 6614.9 ms
+CLIENT RECEIVED: {"content":[{"type":"text","text":"{\"query\":\"srv/reports FROM customers WHERE region = 'emea' -- call 1\",…}"}]}
+[mcp-recorder] session 352b574d recorded 6 events (0 dropped) -> data-hold/evidence.db
+```
+
+(trimmed: the tail of the echoed arguments on the `CLIENT RECEIVED` line.)
+The 6.6 seconds is how long the approval took to type, not overhead.
+
+Three limits belong here rather than in a footnote. Gateway mode is **not**
+byte-for-byte transparent: a line it cannot parse, or one larger than the
+scanner's buffer (32 MiB, `DEFAULT_MAX_LINE_BYTES` in `src/proxy/framing.ts`),
+is refused with a JSON-RPC error instead of being forwarded, because it cannot
+be shown harmless without parsing. Hold approvals are local trust — anyone who
+can write the data directory can approve a held call. `http --policy`
+enforces the same policy over the HTTP transport
+(`src/proxy/http-gateway.ts`, covered by `test/http-gateway.test.ts` and
+`test/e2e/http-gateway.e2e.test.ts`); it buffers `tools/call` bodies and
+results, so it is not byte-for-byte either.
+
+## Known gaps in what this reports
+
+Each of these is a case where what you see can under-state or mis-state what
+happened.
+
+**1. The two enforcement paths use different event shapes for the same
+thing.** A gateway deny emits a `policy_decision` event *and* a `tool_call`
+carrying `error.type: "policy_denied"`. A hook deny emits only the latter: the
+call's own `pre` `tool_call`. Counted over `export --dir` bundles of a gateway
+deny and a hook deny:
+
+```
+$ grep -c '"kind":"policy_decision"' gwbundle/events.jsonl    # gateway deny
+1
+$ grep -c '"policy_denied"' gwbundle/events.jsonl
+1
+$ grep -c '"kind":"policy_decision"' hookbundle/events.jsonl  # hook deny
+0
+$ grep -c '"policy_denied"' hookbundle/events.jsonl
+1
+```
+
+`sessions`'s `DECISIONS` column, `--json`'s `policy_decision_count` and the
+replay page's `gw-deny` badge all treat the two alike, and both paths also emit
+the same `action_lifecycle` records. But a tool of your own that counts
+`policy_decision` events alone undercounts hook denies. Count both shapes.
+
+**2. `boundary.injection: flag` flags but does not block.** The injected text
+still reaches the agent, as the demo transcript above shows. In the demo what
+prevents the exfiltration is the separate `no-exfil` deny rule, which covers
+that fixture's exfil vector. A fixture using a different vector would be
+flagged and nothing more. If you want the text stopped rather than
+noted, set `injection: block` or `redact` — and read
+[docs/policy.md](policy.md#mcpboundary) for what each one costs.
+
+**3. `ui` against a missing or empty store produces a plausible-looking empty
+page**, with no warning and exit 0. Shown above under
+[What do you get out of a recorded session](#what-do-you-get-out-of-a-recorded-session).
+
+## What does it cost?
+
+### Latency
+
+`npm run bench` measures added latency over 300 timed round-trips against a
+5 ms p50 gate. Two runs on one Linux machine:
+
+```
+  series    p50         p95         p99
+  direct    0.049ms     0.061ms     0.083ms
+  wrapped   0.899ms     1.464ms     1.808ms
+  added     0.850ms     1.403ms     1.725ms
+  ✓ PASS — p50 added latency = 0.850ms (gate: < 5ms)
+```
+
+The second run gave 0.802 ms p50, 1.167 ms p95, 1.786 ms p99. Two runs is two
+runs; what they show is roughly a fifth of the gate, not a figure to quote to
+three decimal places. Run the bench on your own hardware before you rely on
+the number.
+
+Read that with its limit attached: the benchmark wraps the repository's echo
+fixture, which answers in about 0.05 ms. The number is the proxy's added cost,
+not a total; against a real server that takes tens or hundreds of milliseconds
+it disappears into the noise. Gateway mode is a separate, opt-in measurement
+(`npm run bench:gateway`).
+
+**The hook path is a different measurement, and its recorded durations are
+not this tool's cost.** Claude Code spawns one process per hook event, so a
+call tapped by the hook pays two process spawns; the recording itself happens
+out of band, in those processes, not inside the call
+([docs/hooks.md](hooks.md#performance)). The `duration_ms` the hook records is
+the wall-clock gap between its own PreToolUse and PostToolUse events, which
+includes Claude Code's own handling of the call as well as the two spawns.
+That gap can be a second or more on calls the stdio proxy times in
+milliseconds. Do not read the difference as recorder overhead; nothing here
+separates the two.
+
+### Disk
+
+Stored bytes track the number and shape of messages, not the size of the
+payloads, because every string becomes a fixed-width `sha256:` reference.
+Measured on one machine, all from 200-tool-call sessions of 204 events each, on a
+machine with six credential-shaped environment variables unless the row says
+otherwise:
+
+| What was recorded | Backend | Bytes on disk | Per event |
+| --- | --- | --- | --- |
+| 200 calls, about 250 B of arguments each | jsonl | 497,890 | 2,441 B |
+| the same, with no credential-shaped env vars set | jsonl | 353,678 | 1,734 B |
+| the same | sqlite (default) | 933,888 | 4,578 B |
+| a second identical session appended to that sqlite store | sqlite | +909,312 | 4,457 B |
+| **200 calls, about 20 KB of arguments each** | jsonl | **498,699** | **2,445 B** |
+
+The last row is the one to read twice. Roughly eighty times the payload
+produced 0.16% more evidence. What does drive per-event size is the identity
+block that every event carries, including one fingerprint per
+credential-shaped environment variable: the second row is the first one with
+those six removed, and the difference is 707 bytes on every event.
+
+The jsonl backend also writes a `signatures.jsonl` beside `evidence.jsonl`
+(75,576 B for the first row); the sizes above are `evidence.jsonl` alone.
+
+As a rough scale, on this machine, with this fixture and this argument shape,
+10,000 tool calls come to about 25 MB of `evidence.jsonl` plus about 4 MB of
+signatures, or about 45 MB on sqlite. Your servers, your arguments and your
+environment will move that figure, so measure before you plan capacity. There
+is no retention, rotation or pruning yet: the store grows until you delete it.
+
+### What it does not do
+
+- **It does not store payloads.** You cannot read back what a tool returned.
+  You can confirm that a value you already hold passed through, via `query`.
+  If that trade is wrong for you, this is the wrong tool.
+- **It does not prevent tampering, it makes tampering evident.** Anyone who
+  can write your disk can delete the store outright, and `verify` cannot
+  detect a store that has been deleted. What they cannot do quietly is edit it.
+- **It does not defend against a fully compromised host** that rewrites the
+  chain and `identity.key` together.
+- **Record mode does not enforce anything.** It never blocks, rewrites or
+  rate-limits. Enforcement needs gateway mode or a hook policy.
+- **Gateway mode enforces only what a policy names**, and only for
+  `tools/call` requests and their results. A `flag` boundary action does not
+  stop anything reaching the agent.
+- **It cannot see the Anthropic-to-vendor hop** on any surface, and cannot
+  block a connector call before it runs on claude.ai web, Desktop chat or
+  Cowork. See [docs/install.md](install.md#connectors-what-the-recorder-can-and-cannot-see).
+- **It does not aggregate across machines**, and has no fleet view, no
+  retention policy and no external anchoring of chain heads yet.
+
+## Is this for you?
+
+It fits if:
+
+- you are converting a rep's or a team's tool whose MCP calls need a chained,
+  signed record now, and per-tool allow / hold / deny over those calls is the
+  control you want today — the MCP leg of Governed Tools, on its own;
+- you run agents against local stdio MCP servers and want a record you can
+  hand to someone else, verifiable with bare Node and no network access to
+  anyone;
+- you need to answer "did this credential ever pass through an agent, and
+  where did it go" after the fact;
+- you use Claude Code and want per-call visibility into Anthropic-hosted
+  connectors, with deny rules that block a call before it runs — written
+  against the tool, as [above](#hook-enforcement-on-hosted-connectors).
+
+It does not fit if you expect any of the following from this package alone,
+because each is the control plane's job, or nobody's:
+
+- per-user attribution beyond a supplied token — with `--identity-jwt` events
+  carry `identity.actor` (user, tool, host, run_as) and
+  `identity.actor_verified`, but the claim is only as good as that token:
+  `actor_verified: false` means the signature was never checked, the token is
+  read once at start so one proxy process is one actor, and without a token an
+  event carries only an OS username and a hostname;
+- per-user credential injection without a control plane — the
+  **local** broker resolves credentials on the agent's own machine from env,
+  file or command sources, while `credentials[].broker: { kind: remote }` does
+  put a control plane behind it: `RemoteBroker` fetches the person's own token
+  per call from `POST /v1/broker/user-token` and swaps it at the declared site,
+  with 403 a deny carrying the control plane's reason and anything else
+  `control_plane_unavailable` (fail closed) — `src/broker/remote.ts`,
+  [docs/policy.md](policy.md);
+- a credential swap on Anthropic-hosted connectors — architecturally
+  impossible from the customer side; the hook can deny those calls and
+  nothing can swap their credential;
+- a manager or security view — `ui` is a replay page over one store;
+- a degrade-to-read-only mode — by design: when the control plane is
+  unreachable the MCP gateway fails closed, quickly and retryably, with no
+  credential or cached-token fallback; `MCP_RECORDER_DISABLE=1` removes recording and
+  enforcement together and is a kill switch, not a degrade mode. The HTTPS
+  tool's behaviour is the control plane's.
+
+It also does not fit if:
+
+- your agents run on claude.ai web, Desktop chat or Cowork and you want
+  per-call visibility — the tap does not exist, and
+  [docs/install.md](install.md#connectors-what-the-recorder-can-and-cannot-see)
+  sets out what does;
+- you need readable payloads in the log for debugging;
+- you need tamper prevention, a WORM store, or an auditor-grade retention
+  regime;
+- you need enforcement over the HTTP transport that is byte-for-byte
+  transparent — `http --policy` now enforces (`src/proxy/http-gateway.ts`,
+  `test/http-gateway.test.ts`, `test/http-gateway-failclosed.test.ts`), but
+  gateway mode buffers `tools/call` bodies and results, so it is not
+  byte-for-byte; without `--policy` the HTTP proxy still streams every byte;
+- you need every enforcement action recorded in one event shape — today the
+  two paths record differently, as
+  [Known gaps](#known-gaps-in-what-this-reports) sets out;
+- you cannot tolerate a record with gaps in it. Recording is fail-open by
+  design, and a store failure loses events rather than stopping the agent.
+
+## Where to go next
+
+- [docs/install.md](install.md) — installation, per-client config, Windows and
+  WSL, uninstall, troubleshooting, and what each connector surface exposes.
+- [docs/sink.md](sink.md) — shipping evidence from a team or a fleet to one
+  receiver.
+- [docs/hooks.md](hooks.md) — the Claude Code tap in detail, including the
+  policy file, connector resolution and its fail-open guarantees.
+- [docs/gateway.md](gateway.md) and [docs/policy.md](policy.md) — gateway
+  mode, `policy.yaml` v1 and the boundary filter.
+- [docs/event-schema.md](event-schema.md) — the frozen
+  `cresec.mcp-recorder.event.v1` schema, the chain construction and the
+  canonicalisation rules.
+- [docs/red-team.md](red-team.md) — running the demo incident against a real
+  model instead of the scripted agent.

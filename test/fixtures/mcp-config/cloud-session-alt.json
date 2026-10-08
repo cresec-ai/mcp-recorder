@@ -1,0 +1,1 @@
+{"mcpServers":{"0e1d2c3b-4a59-4687-9a6b-5c4d3e2f1a0b":{"url":"https://api.anthropic.com/v2/ccr-sessions/cse_01ALTFIXTURESESSION00BBBB/mcp?mcp_url=https%3A%2F%2Falt.clickup.example.test%2Fmcp","type":"http"},"only-in-alt":{"url":"https://only-in-alt.example.test/mcp","type":"http"}}}

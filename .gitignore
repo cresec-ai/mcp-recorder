@@ -1,0 +1,29 @@
+# Node
+node_modules
+*.tsbuildinfo
+npm-debug.log*
+
+# Test artifacts
+coverage/
+coverage.*
+
+# Local evidence stores / demo output (never commit recorded data)
+.mcp-recorder/
+demo-data/
+# Default data dir of the reference receiver (receiver/): received evidence,
+# ingest tokens and the operator token. Never commit it.
+receiver-data/
+*.evidence.db
+*.evidence.jsonl
+bundle*.zip
+
+# env file
+.env
+
+# Editor/IDE
+# .idea/
+# .vscode/
+
+# Claude Code agent worktrees
+.claude/worktrees/
+.mcp-recorder-install.lock/

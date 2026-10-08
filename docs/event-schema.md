@@ -1,0 +1,873 @@
+# Event schema — `cresec.mcp-recorder.event.v1`
+
+This document is the normative description of the wire/storage format produced by
+`@cresec/mcp-recorder`. The TypeScript source of truth is
+[`src/schema/events.ts`](../src/schema/events.ts); this document transcribes it for
+readers who verify or consume bundles without reading TypeScript.
+
+## Freeze policy
+
+The schema id is `cresec.mcp-recorder.event.v1`. Every field shipped under this id is
+**frozen**:
+
+- Changes are **additive only** — new optional fields or new event kinds may be added.
+- Existing fields are never renamed, retyped, or removed.
+- Any breaking change requires a **new schema id** (`...event.v2`); v1 records remain
+  verifiable forever, because chain hashes are computed over the canonical JSON of the
+  event exactly as recorded.
+
+The identifiers changed **once**, in 0.2.0, when the package became
+`@cresec/mcp-recorder`: the genesis, head-signature, bundle, event, sink and replay
+ids took the `cresec.mcp-recorder.*` prefix. The recipes (canonical JSON, the hash
+chain, the signed-payload layout, the bundle layout) did not change. The format is
+frozen from 0.2.0 on. Records written before 0.2.0 verify with the version that wrote
+them, and every exported bundle verifies with the `verify.cjs` it carries; there is no
+migration. Pointed at a store written before 0.2.0, `verify`, `ui`, `doctor` and the
+sink say that the store predates the current evidence format instead of reporting a
+bare chain break.
+
+## Privacy posture
+
+Payloads never land in the store readable. String values are replaced at the edge by
+**redacted refs** — a SHA-256 of the exact value plus its length. Hashes are
+**deliberately unsalted** so a blast-radius query can match a known probe value by
+hashing it the same way. The ref covers the *whole* value, so that search is exact:
+a substring of a stored string (the host part of a URL, say) hashes to something
+else and finds nothing. See the tradeoff discussion in the
+[security model](reference.md#security-model-the-honest-version).
+
+**The allowlist is position- and value-aware, not just key-aware.** A string only
+survives un-hashed when BOTH hold: its key is one of a small fixed set (`type`,
+`role`, `level`, `mimeType`, `protocolVersion`, `method`, `name`), AND its value
+belongs to that key's structural vocabulary — an MCP content-block `type`
+(`text`/`image`/`audio`/`resource`/`resource_link`), a `role` of `user`/`assistant`, a
+logging `level`, a `mimeType` matching `^[\w.+-]+/[\w.+-]+$`, a `protocolVersion`
+matching `^\d{4}-\d{2}-\d{2}$`, a `method` matching `^[a-z]+(/[a-zA-Z_]+)*$`, or a
+`name` that is specifically `tools[*].name` / `prompts[*].name` inside a list result
+(matching `^[\w.-]{1,64}$`) — never a bare top-level `name`, and never one hop deeper
+(`tools[*].inputSchema.name` does not qualify). Every other string, under every other
+key or position, is hashed. `code`, `status`, `kind` and `tool` were removed from the
+allowlist entirely: no safe structural vocabulary exists for them, so they always hash.
+
+**Under a `tool_call`'s `args` NOTHING passes, in any redaction mode.** Arguments are
+the most attacker/user-controlled data the proxy ever sees, so every string leaf there
+is hashed unconditionally — the vocabulary above only ever applies elsewhere (e.g.
+`tool_call.result`, `rpc.params`, `notification.params`).
+
+**Object keys are redacted too, not just values.** A key survives as-is only if it
+matches `^[A-Za-z_$][\w$-]{0,63}$` (a plain identifier, hyphens allowed) AND does not
+itself look secret-shaped (the same `alwaysPatterns` used for values, checked in every
+redaction mode); otherwise the key is replaced by `sha256:<hex>` of the original key
+text — still a plain JSON string, so no schema change. This closes two gaps: a map
+keyed by email/username/file-path/header-line no longer lands in clear, and hashing the
+key (rather than dropping it) means `query` can still find a needle that was only ever
+used as a key. A literal `__proto__` key is preserved as a genuine own property (the
+scrubbed tree is built without going through a normal object's prototype setter), never
+silently dropped.
+
+**Verbatim protocol strings copied off the wire are capped too (P0).** A handful of
+fields are stamped onto events directly from the MCP handshake / JSON-RPC envelope
+rather than through a `scrub()`-walked tree — they stay plain top-level strings by
+schema, so `scrub()`'s length/vocabulary gates never applied to them:
+`ToolCallEvent.tool` (and the `gen_ai.tool.name` attribute), `RpcEvent`/
+`NotificationEvent.method` (and the `mcp.method.name` attribute), and the
+`initialize` handshake's `protocol_version`/`client_name`/`client_version`/
+`server_name`/`server_version` — plus the `client_name`/`client_version` remembered on
+`IdentityContext` and the `name`/`version` learned onto `ServerContext`, both reused on
+every event recorded after the handshake. A misbehaving or malicious peer could
+otherwise stuff kilobytes of arbitrary text — including payload it wants to smuggle
+past redaction — into every event through any one of these. `structuralString()`
+(`src/redact/redactor.ts`) closes this: a value survives AS-IS only when it is at most
+128 characters **and** matches a conservative shape for its kind —
+
+| Kind | Applies to | Shape |
+| --- | --- | --- |
+| `identifier` | tool name, JSON-RPC method, clientInfo/serverInfo `name` | `^[A-Za-z0-9_.:/-]+$` |
+| `version` | clientInfo/serverInfo `version` | `^[A-Za-z0-9_.+-]+$` |
+| `protocol_version` | negotiated `protocolVersion` | `^\d{4}-\d{2}-\d{2}$` |
+
+— otherwise the value is replaced by its `sha256:<hex>` reference, computed the exact
+same way as any other redacted value (`sha256Ref`/`Redactor.hashString`), so a
+blast-radius `query` for the original value still finds it. The field itself stays a
+plain `string` either way — never a `RedactedRef` object — so this is not a schema
+change. Each value is capped ONCE, at the point it is first read off the wire (a
+request's own `method`/`params.name`, or the `initialize` handshake's
+`clientInfo`/`serverInfo`); every later use of that same value — the identity/server
+context stamped on every subsequent event, and the synthetic `unanswered` events sealed
+at shutdown (see [`session_end`](#session_end) below) — reuses the already-capped value,
+so nothing downstream needs its own cap.
+
+Note the asymmetry on `ServerContext.name`: it is `--name` (operator-supplied, never
+capped) else the serverInfo name **learned from the handshake** (capped) else a locally
+derived basename of the wrapped command (not peer-controlled, not capped either).
+
+---
+
+## Common types
+
+### `Sha256Ref`
+
+A string of the form `sha256:<64 lowercase hex>`.
+
+### `RedactedRef`
+
+A redacted leaf value. The original never leaves the machine readable.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `redacted` | `true` | Discriminator; always literally `true`. |
+| `ref` | `Sha256Ref` | `sha256:<hex>` of the exact UTF-8 encoding of the original string. |
+| `len` | `number` | Length of the original string in UTF-16 code units. |
+| `secret_refs` | `Sha256Ref[]?` | Optional, additive (v1). Hashes of secret-shaped tokens (`alwaysPatterns` matches) found **embedded inside** this leaf — e.g. the AWS key inside `"AWS_ACCESS_KEY_ID=AKIA...\n"`. De-duplicated, capped at 8, and never includes a hash equal to `ref` itself. This exists because `query` otherwise only matches a *whole* leaf: a credential glued into a longer string (a log line, an exfiltrated file's contents, a sentence) would hash as one opaque blob and never surface. **A miss against `secret_refs` is not proof a value never appeared here** — only tokens shaped like a known `alwaysPatterns` entry are captured this way; a value that isn't secret-shaped on its own (and isn't under an allow-listed key/position) is still hashed as part of the whole leaf, but no per-token record of it exists. |
+
+### `Scrubbed`
+
+A JSON tree after edge redaction: structure preserved, sensitive leaves replaced.
+Recursively: `string | number | boolean | null | RedactedRef | Scrubbed[] |
+{ [key: string]: Scrubbed }`.
+
+### `CredentialFingerprint`
+
+Hash of a credential value handed to the wrapped server — never the value.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` | Where it came from, e.g. the env var name `GITHUB_TOKEN`. |
+| `ref` | `Sha256Ref` | `sha256:<hex>` of the credential value. |
+
+### `IdentityContext`
+
+Identity context stamped on **every** event ("identity-stamp everything").
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `fingerprint` | `Sha256Ref` | Stable identity hash for the acting agent/credential pair: sha256 over (os_user, hostname, label, initial server name) — the context known at proxy startup, before the MCP `initialize` handshake. `client_name`/`client_version` are learned later from that handshake and are **not** part of the fingerprint. |
+| `os_user` | `string?` | OS user running the proxy. |
+| `hostname` | `string?` | Host the proxy ran on. |
+| `client_name` | `string?` | From the MCP `initialize` handshake clientInfo, once seen. Capped (`structuralString`, kind `identifier`) — see [above](#privacy-posture). |
+| `client_version` | `string?` | From the MCP `initialize` handshake clientInfo, once seen. Capped (`structuralString`, kind `version`) — see [above](#privacy-posture). |
+| `label` | `string?` | Operator-supplied label (`--identity`). |
+| `credential_fingerprints` | `CredentialFingerprint[]?` | Hashes of secret-looking env values passed to the wrapped server, plus the argv/target-URL pieces described below. **Never the recorder's own configuration** (`MCP_RECORDER_*`) — see *What is never fingerprinted*, below. |
+| `actor` | `ActorClaim?` | Additive, optional (schema stays v1). The ADR 012 actor claim — who acted, through which tool version, from which host, on whose behalf — when the recorder was started with an identity JWT. See [Actor claim](#actor-claim-optional-additive) below. Absent otherwise: an event with no `actor` reads as **unattributed**, which is the honest state. |
+| `actor_verified` | `boolean?` | Additive, optional (schema stays v1); present exactly when `actor` is. Whether the identity JWT's EdDSA signature was checked against a JWKS (`--identity-jwks`). Beside `actor`, never inside it, so `actor` stays the control plane's shape byte for byte. |
+
+### Actor claim (optional, additive)
+
+`identity.actor` carries the actor claim of ADR 012 in the Cresec control
+plane, copied field for field from the **identity JWT**
+the control plane mints for a signed-in person (`docs/internal/contracts/identity-jwt.md`
+there). It is a pure function of the token's claims: `user` from `sub`,
+`email`, `idp`, `idp_sub`; `tool` and `host` from the claims of the same
+name; `run_as` from `run_as`. Nothing is looked up, and nothing else from the
+token is recorded — not the token, its signature, `jti`, `role`, `iat` or
+`exp`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `user` | `{ id: string; email: string; idp: 'okta' \| 'entra' \| 'google' \| 'test'; idp_sub: string }` | The person: the control plane's `user.id` (uuid), their email, which IdP authenticated them and the IdP's own subject (`""` when `idp` is `test` and none was seeded). |
+| `tool` | `{ id: string; name: string; version: string }` | The registered tool version the person signed in through (`tool.id` is the registry uuid, `name` its slug). |
+| `host` | `{ origin: string; kind: 'vercel' \| 'lambda' \| 'other' \| 'local' }` | Where that tool runs, **as registered** — copied from the registry at sign-in, never observed on the wire. |
+| `run_as` | `'user' \| 'owner'` | `owner` for a job token running as the tool's owner with nobody signed in. |
+
+Those four fields are the whole object — exactly `ActorClaim` in the control
+plane's `packages/contracts/src/actor.ts` — so an audit record's `actor` and a
+control-plane record's `actor` for the same person and tool compare equal
+byte for byte. What this leg did to check the token is recorded **beside**
+it:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `identity.actor_verified` | `boolean` | Whether the JWT's EdDSA signature was checked against a JWKS (`--identity-jwks <path-or-url>`). **`false` means the signature was not checked**: the claims were decoded, their `exp`/`iat` were checked (below), and the record says what the token said, no more; an auditor who needs more verifies the token out of band. |
+
+How it gets there: `mcp-recorder record`, `http` and `hook` take
+`--identity-jwt <path>` (a file holding the compact JWS); a policy's
+`credentials[].broker.identity_jwt_env` names an environment variable holding
+the same token (the CLI reads it for `record` and `http`). Without
+`--identity-jwks` the token is decoded only and every event carries
+`actor_verified: false`; with it, the signature is verified against the JWKS
+document (`{ keys: [{ kty: "OKP", crv: "Ed25519", x, kid, alg: "EdDSA" }] }`,
+the control plane's `GET /.well-known/jwks.json?tenant=<slug>`) and a token
+that does not verify is a **startup error** (exit 2) — the operator asked for
+verification and must not get an unverified claim stamped on the chain. In
+**both** modes the token's `exp` and `iat` are checked against the clock
+(`exp > now − 30 s`, `iat ≤ now + 30 s`, identity-jwt.md's verification step
+4): they are claims, not signatures, and an expired token is refused at start
+rather than attributing every record to its subject for as long as the file
+sits there.
+
+The chain and the verifier treat events with and without `actor` identically:
+hashes are computed over the canonical JSON of whatever is there, so a bundle
+holding actor events verifies with the same `verify.cjs` as one without
+(`test/e2e/http-gateway.e2e.test.ts` proves it). As ADR 012 says, the email
+address is therefore in the evidence store in clear — the one identifier a
+record exists to carry.
+
+This touches **invariant 3** (every record carries who acted). It does not make the MCP leg
+per-user on its own: the claim is stamped from a token the operator supplies
+at start, so one proxy process is one actor, and a session with no token is
+still unattributed.
+
+### `ServerContext`
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `string` | Logical server name (`--name` flag, else derived from command/initialize). The initialize-learned component is capped (`structuralString`, kind `identifier`) — see [above](#privacy-posture); an operator-supplied `--name` is not. |
+| `version` | `string?` | From the MCP `initialize` result serverInfo, once seen. Capped (`structuralString`, kind `version`) — see [above](#privacy-posture). |
+| `command` | `string` | stdio transport: the wrapped command line (argv, scrubbed and re-joined with spaces). http transport: the target URL, scrubbed (see below). env values never included either way. |
+| `transport` | `'stdio' \| 'http'` | Transport the proxy bridged. |
+| `url` | `string?` | Additive, optional (schema stays v1); hook-sourced, on `tool_call` events only. Where the server named by `name` is, **as asserted by the MCP config file `mcp-recorder hook` found** (`MCP_RECORDER_MCP_CONFIG`, else `/tmp/mcp-config-*.json` in a cloud session) — not observed on the wire; that file is writable by the agent running under the hook, see [docs/hooks.md](hooks.md#cloud-sessions-uuid-server-names-and-serverurl). The value is the vendor endpoint behind an Anthropic-hosted connector's relay (the relay URL's decoded `mcp_url`, e.g. `https://mcp.clickup.com/mcp`), else the config entry's own URL. Scrubbed like the http transport's target URL below — userinfo stripped, query string and fragment dropped — but the stripped pieces are dropped **without** `credential_fingerprints` (the hook never sends them), and more strictly on the path: every segment that is secret-shaped, **an opaque identifier** (a UUID, a cloud session id such as `cse_...`) **or not a short vocabulary token** (`[A-Za-z0-9._-]{1,32}`) is replaced in place by its `sha256:<hex>` ref, so a relay URL never carries the session id and no free text from the file reaches the store. A scrubbed URL over 2048 characters is not recorded at all. Undefined when unresolved, on session-level hook events (`session_start`/`session_end`/the Stop notification, whose `name` is the client), and on every proxy-captured event (the http proxy records its target in `command`). See [Hook-sourced events](#hook-sourced-events-additive). |
+
+**What is never fingerprinted.** `identity.credential_fingerprints` answers one
+question — *which sessions saw this secret* — and it is only a useful question for
+secrets the agent and the wrapped server were exposed to. Environment variables in the
+recorder's own namespace (`MCP_RECORDER_*`, e.g. `MCP_RECORDER_SINK_TOKEN` and
+`MCP_RECORDER_SINK_TOKEN_FILE`) are therefore skipped by the collector
+(`collectEnvCredentialFingerprints`, `src/redact/redactor.ts`), and so is a
+`MCP_RECORDER_*=value` element inside a wrapped command (its value is still hashed out
+of `command`, it is simply not fingerprinted onto identity). The exclusion is the whole
+namespace, not a list of names, so a variable added later cannot escape it.
+
+This is not tidiness. Refs are unsalted by design (see [Privacy posture](#privacy-posture)),
+which means a *low-entropy* value's ref is recoverable by brute force — and the evidence
+sink ships every event to the receiver that the sink token authenticates to. Fingerprinting
+that token put a reversible copy of the receiver's own bearer credential on every event
+it received. Nothing in the recorder's configuration belongs in a blast-radius query, so
+none of it is collected in the first place.
+
+**`command` argv handling (stdio transport).** A raw `argv.join(' ')` would leak
+`--api-key sk-...`, `--token ...`, and connection strings like `postgres://user:pass@host`
+straight into every event, the replay HTML, and export bundles. Each argv element is
+scrubbed before joining:
+
+- an element that looks secret-shaped (`looksSecret` / `alwaysPatterns`) is replaced
+  whole by `sha256:<hex>`;
+- a URL carrying userinfo (`scheme://user:pass@host/path`) has the userinfo stripped —
+  only `scheme://host/path` is kept, dropping the credential and any query/fragment;
+- an element that is (or immediately follows) a flag whose name matches
+  `/(TOKEN|SECRET|PASSW|API[_-]?KEY|CREDENTIAL|AUTH)/i` — both `--token X` and
+  `--token=X` — is replaced whole by `sha256:<hex>`;
+- a `--flag=value` pair whose FLAG name does **not** match that credential-name pattern
+  still has its VALUE half scrubbed on its own (looks-secret check, then the
+  URL-userinfo check) before being re-joined as `--flag=<scrubbed-value>` — this covers
+  DSN/URL-shaped flags a fixed name list can't anticipate, e.g. `--dsn=postgres://u:p@h`
+  or `--database-url=mysql://u:p@h/db`.
+
+Every replaced or stripped piece is also recorded as a `CredentialFingerprint` on
+`identity.credential_fingerprints` (`name` is the flag name when one applied, else
+`argv[<index>]`), so a blast-radius `query` for the leaked value still finds the event
+that carried it, even though `command` itself no longer contains it. When a piece is a
+URL's `user:pass` userinfo, the joined string is fingerprinted AND (additive) the
+password and username are each fingerprinted separately, so a query for the leaked
+password alone — without knowing the username — still matches.
+
+**`command` target-URL handling (http transport).** The `--target` URL can carry a
+credential in three different places, not just userinfo, so all three are scrubbed
+independently before the URL is recorded:
+
+- userinfo (`http://user:pass@host/...`) is stripped from the recorded URL;
+- each PATH segment that looks secret-shaped (`looksSecret`) — the shape hosted-MCP
+  endpoints use, e.g. `https://host/mcp/sk-.../sse` — is replaced in place by
+  `sha256:<hex>`, leaving the rest of the path intact;
+- the entire QUERY STRING and fragment are dropped from the recorded URL
+  unconditionally (e.g. `?api_key=...`, `?token=...`) — there is no safe subset of a
+  query string to keep once any single parameter can be a bearer credential.
+
+The real upstream connection still uses the original, unscrubbed target URL; only the
+copy stamped on events is affected. Every stripped/replaced piece (userinfo — joined
+and, additively, user/password separately — each secret-shaped path segment, each
+secret-shaped query value) is recorded as a `CredentialFingerprint` on
+`identity.credential_fingerprints`, named `target_url_userinfo`, `target_url_path[<i>]`,
+or `target_url_query.<key>` respectively.
+
+### `Attributes`
+
+An OTel-style flat attribute bag: `Record<string, string | number | boolean>`. Keys use
+OpenTelemetry semantic-convention names where one exists — see the
+[mapping table](#opentelemetry-semantic-convention-mapping) below.
+
+---
+
+## Event envelope (`EventBase`)
+
+Every event carries these fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `schema` | `'cresec.mcp-recorder.event.v1'` | Frozen schema id. |
+| `event_id` | `string` | UUID v4, unique per event. |
+| `session_id` | `string` | UUID v4, one per proxy process lifetime. |
+| `timestamp` | `string` | ISO-8601 UTC with milliseconds. |
+| `kind` | `EventKind` | One of the seven kinds below. |
+| `identity` | `IdentityContext` | Who acted. |
+| `server` | `ServerContext` | What was wrapped. |
+| `attributes` | `Attributes` | Flat semconv-named attribute bag. |
+| `source` | `'hook'?` | Additive, optional (schema stays v1). Set to `'hook'` when this event was captured by `mcp-recorder hook` (a Claude Code PreToolUse/PostToolUse/PostToolUseFailure/SessionEnd/Stop hook) rather than the stdio/http proxy tap. Undefined on every proxy-captured event. See [Hook-sourced events](#hook-sourced-events-additive) below. |
+
+`EventKind` is one of: `session_start`, `initialize`, `tool_call`, `rpc`,
+`notification`, `protocol_error`, `session_end`, and — additive, recorded only in
+[gateway mode](#gateway-mode-fields-additive) — `policy_decision`.
+
+## Event kinds
+
+### `session_start`
+
+Proxy process started; carries the redaction policy in force.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `proxy_version` | `string` | Version of `@cresec/mcp-recorder`. |
+| `cwd` | `string` | Working directory of the proxy process. |
+| `redaction_mode` | `'allowlist' \| 'off'` | Redaction policy in force for the session. |
+| `policy` | `{ hash: Sha256Ref; name?: string }?` | Additive (v1). Present only in gateway mode: `hash` is the SHA-256 of the exact bytes of the `policy.yaml` in force, `name` its `name` field (capped, `structuralString` kind `identifier`). See [Gateway mode fields](#gateway-mode-fields-additive). |
+
+### `initialize`
+
+The MCP initialize handshake (request + response correlated).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `request_id` | `string \| number` | JSON-RPC request id. |
+| `protocol_version` | `string?` | Negotiated MCP protocol version. Capped (`structuralString`, kind `protocol_version`) — see [above](#privacy-posture). |
+| `client_name` | `string?` | From clientInfo. Capped (`structuralString`, kind `identifier`) — see [above](#privacy-posture). |
+| `client_version` | `string?` | From clientInfo. Capped (`structuralString`, kind `version`) — see [above](#privacy-posture). |
+| `server_name` | `string?` | From serverInfo. Capped (`structuralString`, kind `identifier`) — see [above](#privacy-posture). |
+| `server_version` | `string?` | From serverInfo. Capped (`structuralString`, kind `version`) — see [above](#privacy-posture). |
+| `duration_ms` | `number` | Wall-clock ms between request and response crossing the proxy. |
+
+### `tool_call`
+
+A completed `tools/call` (request + response correlated). The flagship event.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `tool` | `string` | Tool name (`gen_ai.tool.name`). Capped (`structuralString`, kind `identifier`) — see [above](#privacy-posture); an oversized or oddly-shaped name is stored as its `sha256:<hex>` reference instead. |
+| `request_id` | `string \| number` | JSON-RPC request id (`gen_ai.tool.call.id`). |
+| `args` | `Scrubbed` | Redacted argument tree. **Every string leaf is hashed, unconditionally, regardless of key or position or redaction mode** — see [Privacy posture](#privacy-posture). |
+| `result_hash` | `Sha256Ref` | `sha256:<hex>` of canonical JSON of the **complete raw result, pre-redaction**. |
+| `result_hash_depth_capped` | `true?` | Additive, optional (schema stays v1). Present only when the result was nested deeper than the hash depth cap (256). `result_hash` is then **not** `sha256Ref(canonicalJson(result))`: every subtree below that depth hashed as one fixed marker, so two results differing only below it share a hash. The cap is what keeps a hostile payload from overflowing the stack; this field is what stops it being silent. |
+| `result` | `Scrubbed` | Redacted result tree (the position/value-aware allowlist applies here, unlike `args`). |
+| `is_error` | `boolean` | Whether the call returned an error. |
+| `error` | `{ code?: number; type?: string; message_ref?: Sha256Ref }?` | Error details; the message is stored only as a hash ref. `error.type` is a free-form string field. Gateway mode records `'policy_denied'` for a call it refused (see [Gateway mode fields](#gateway-mode-fields-additive)) and `'duplicate_id'` for a call refused because its JSON-RPC request id was still in flight (held for approval, or pending). `mcp-recorder hook` records the additive values `'policy_denied'` (a `--policy` deny), `'tool_error'` (the call failed: a PostToolUseFailure) and `'interrupted'` (a PostToolUseFailure with `is_interrupt`) — see [Hook-sourced events](#hook-sourced-events-additive). |
+| `duration_ms` | `number` | Wall-clock ms between request and response crossing the proxy. |
+| `gateway` | `GatewayOutcome?` | Additive (v1). Present on every `tool_call` recorded in gateway mode — see [Gateway mode fields](#gateway-mode-fields-additive). |
+| `phase` | `'pre' \| 'post'?` | Additive, optional (schema stays v1). `mcp-recorder hook` records a tool call as two separate correlated events sharing `request_id` (a PreToolUse event, before the tool runs, and a PostToolUse or PostToolUseFailure event, after) — this says which half. Undefined for proxy-captured `tool_call` events, which are already request+response correlated into one event. See [Hook-sourced events](#hook-sourced-events-additive). |
+
+### `rpc`
+
+Any other correlated JSON-RPC request/response (`tools/list`, `resources/read`, ...).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `method` | `string` | JSON-RPC method (`mcp.method.name`). Capped (`structuralString`, kind `identifier`) — see [above](#privacy-posture); an oversized or oddly-shaped method is stored as its `sha256:<hex>` reference instead. |
+| `request_id` | `string \| number` | JSON-RPC request id. |
+| `params` | `Scrubbed` | Redacted params tree. |
+| `result_hash` | `Sha256Ref` | `sha256:<hex>` of canonical JSON of the complete raw result, pre-redaction. |
+| `result_hash_depth_capped` | `true?` | Additive, optional (schema stays v1). Same meaning as on `tool_call`. |
+| `is_error` | `boolean` | Whether the call returned an error. |
+| `error` | `{ code?: number; type?: string; message_ref?: Sha256Ref }?` | Error details; message hashed. |
+| `duration_ms` | `number` | Wall-clock ms between request and response. |
+
+### `notification`
+
+One-way JSON-RPC notification in either direction.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `method` | `string` | JSON-RPC method (`mcp.method.name`). Capped (`structuralString`, kind `identifier`) — see [above](#privacy-posture); an oversized or oddly-shaped method is stored as its `sha256:<hex>` reference instead. |
+| `direction` | `'client_to_server' \| 'server_to_client'` | Which way it flowed. |
+| `params` | `Scrubbed` | Redacted params tree. |
+| `gateway` | `GatewayOutcome?` | Additive (v1), gateway mode only. Present on the two `tools/call` shapes the gateway refuses that have no usable request id: a **notification** the policy denied, and a request whose `id` is not a `string` or a `number` (`refusal: 'invalid_request_id'`). Neither can be a `policy_decision` event, because `request_id` is `string \| number` and neither message has a value that fits it. Without this field a refusal left nothing but a line on stderr: the chain held an ordinary `notification` event, indistinguishable from a forwarded one. `mcp-recorder sessions` counts it in `policy_decision_count`. |
+
+### `protocol_error`
+
+Traffic the tap could not interpret.
+
+In **record mode** forwarding is unaffected (fail-open): the bytes cross
+byte-for-byte and the event is the only trace. In **gateway mode** a client
+line the policy could not be shown is REFUSED — the client is answered
+`-32600` and nothing reaches the server — and takes this same event, because
+it has no method to record a `notification` against and no id to record
+anything else against. That covers an oversized line, a line that is not
+JSON, and a nested array inside a JSON-RPC batch. So in gateway mode this
+kind is also part of the enforcement record, and `line_hash` is what
+identifies the artifact that was refused.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `direction` | `'client_to_server' \| 'server_to_client'` | Which way the bytes flowed. |
+| `reason` | `'unparseable' \| 'oversized' \| 'orphan_response'` | Why the tap could not record it normally. |
+| `bytes_len` | `number` | Length of the raw line in bytes. |
+| `line_hash` | `Sha256Ref` | `sha256:<hex>` of the raw line, so the artifact is still identifiable. |
+
+### `session_end`
+
+Proxy shutting down (child exit, stdin close, or signal).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `reason` | `'child_exit' \| 'stdin_closed' \| 'signal' \| 'error'` | Why the session ended. |
+| `child_exit_code` | `number \| null?` | Exit code of the wrapped server, when known. |
+| `events_recorded` | `number` | Events successfully written this session. |
+| `events_dropped` | `number` | Events lost to fail-open recording (store failure, backpressure). |
+| `spawn_error` | `string?` | errno code (e.g. `ENOENT`, `EACCES`) when the wrapped command could not be spawned at all (`reason: 'error'`). The proxy's own exit code is mapped from this: `ENOENT` → 127, `EACCES` → 126, anything else → 1. |
+| `child_signal` | `string?` | Signal name (e.g. `SIGKILL`) when the wrapped process was terminated by a signal. The proxy's own exit code is `128 + <signal number>` in that case. |
+
+Before `session_end` is recorded, any request still awaiting a response when the
+session ends (the wrapped server crashed or was killed mid-call, or the client
+disconnected mid-handshake) is flushed as one synthetic event per pending
+request, so the chain never silently drops in-flight work: a `tools/call`
+becomes a `tool_call` event, everything else (including an unanswered
+`initialize`) becomes an `rpc` event. Both are marked `is_error: true`,
+`error: { type: 'unanswered' }`, `result_hash` is the hash of canonical `null`
+(a `tool_call` also sets `result: null`), and `duration_ms` is measured from
+the request crossing the proxy to session shutdown. `error.type` is an
+existing free-form string field, so this needed no schema change. The synthetic
+event's `tool`/`method` is whatever was captured for the pending request — already
+capped (`structuralString`, see [Privacy posture](#privacy-posture)) at the point the
+request was first seen, so an unanswered call with an oversized/malformed name or
+method is just as capped here as in a normal completed event. The same
+synthetic shape is reused with `error.type: 'duplicate_id'` when gateway mode
+seals a pending request whose id an approved hold reclaims — identical
+`result_hash` / `result: null` / `is_error: true`, only the error class differs.
+
+## Gateway mode fields (additive)
+
+[Gateway mode](gateway.md) (`record --policy policy.yaml`, and
+`http --policy policy.yaml` for the streamable-HTTP transport) enforces a
+[`policy.yaml`](policy.md) on `tools/call` traffic. Everything it records is
+**additive under v1**: one new event kind and two optional fields. Records
+written in record mode never carry any of them, and old records verify
+exactly as before (canonical JSON drops nothing that was never there).
+
+### `GatewayOutcome` (the `tool_call.gateway` field)
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `decision` | `'allow' \| 'deny' \| 'hold'` | What the policy decided for the request. |
+| `rule_id` | `string?` | The rule that matched; absent when the section's `default` applied. An explicit id already matches the `structuralString` identifier shape and is kept as-is, and so is an auto-assigned `rule[<index>]`; only an off-shape id would be stored as its `sha256:<hex>` reference. |
+| `refusal` | `string?` | Additive (v1). Present when the gateway refused the MESSAGE rather than evaluating it against the policy, so a `deny` with no `rule_id` is not misread as the section default having applied. An identifier naming the refusal, the way `error.type` names an error class; `invalid_request_id` — a `tools/call` whose `id` property is not a usable JSON-RPC id — is the only value the proxy writes today. |
+| `outcome` | `'approved' \| 'denied' \| 'timeout' \| 'cancelled' \| 'session_end'?` | Holds only: how the hold was resolved (`session_end` = the proxy shut down while the call was still held). |
+| `approval_id` | `string?` | Holds only. Absent when the call was refused before a hold file existed (see `policy_decision`). |
+| `waited_ms` | `number?` | Holds only: how long the call was parked before it was resolved. |
+| `boundary` | `BoundaryReport?` | Present when the result went through the tool-result boundary filter: every `allow`ed and `approved` call whose server answered, including answers delivered inside a JSON-RPC batch array. |
+
+### `BoundaryReport`
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scanned` | `boolean` | `false` when the result exceeded `boundary.max_scan_bytes` or the filter hit an internal error. |
+| `action` | `'none' \| 'redact' \| 'block' \| 'flag'` | What was applied to the result the client received. |
+| `secrets_found` | `number` | Secret-shaped spans found. The boundary filter runs a **narrowed** subset of `alwaysPatterns` — provider-prefixed tokens, JWTs, PEM private keys, bearer values and `secret=`-style assignments — excluding the generic long-hex and long-base64 shapes so ordinary output (git SHAs, checksums, inline images) is never rewritten. `secret_refs` on stored `RedactedRef` leaves keeps the full, wider `alwaysPatterns` meaning. |
+| `injection_found` | `number` | Prompt-injection marker spans found. |
+| `secret_refs` | `Sha256Ref[]?` | Hashes of the secret tokens found (de-duplicated, capped at 8) — the model may never have seen the values, `query` still finds the call. |
+| `delivered_result_hash` | `Sha256Ref?` | Present only when the filter modified the result: `sha256:<hex>` of the canonical JSON of the result **the client actually received**. `result_hash`/`result` keep their frozen meaning — the complete raw result the server returned, pre-redaction and pre-filter. |
+| `error` | `string?` | Internal-error class when `scanned` is `false` for a reason other than size. |
+
+### `policy_decision`
+
+An enforcement action taken by the gateway: one per **deny**, and one per
+**hold outcome**. Allowed calls do not produce this event (their `tool_call`
+carries `gateway.decision: 'allow'`), so the kind is a complete list of
+everything the gateway ever refused or paused.
+
+`mcp-recorder sessions` reports how many of these a session has: the
+`DECISIONS` column, `policy_decision_count` in `--json` (an additive key both
+store backends always set). It counts these **events**, so an approved hold
+counts exactly like a deny — the gateway ruled on the call either way — and a
+session recorded without a policy reads `0`. The synthetic `tool_call` that
+carries a refusal back to the client is counted under `TOOL_CALLS` and
+`ERRORS` like any other failed call, never a second time here.
+
+It also counts the **hook's** deny shape: `mcp-recorder hook --policy`
+records a deny as the call's own `pre` `tool_call` with `error.type:
+'policy_denied'` (a hook deny has no JSON-RPC id, so it cannot be a
+`policy_decision` either; see [Hook-sourced events](#hook-sourced-events-additive)).
+That event is one decision here and one call/error in `TOOL_CALLS`/`ERRORS`
+— the same arithmetic a gateway deny has — so `DECISIONS` reads alike
+whichever surface refused the call, and the replay page badges both with the
+same red `gw-deny` badge (`hook deny` / `gateway deny`). This closes the
+"one deny event shape" ticket's counting half; the two shapes themselves
+stay two. That is not by itself an **invariant 3** gap: separate intent,
+decision and outcome records are the shape its lifecycle clause asks for.
+Governed calls now also emit the additive `action_lifecycle` records below.
+They do not increment `DECISIONS`: that column keeps its established
+refusal/hold counting semantics, including the hook's denied pre record.
+
+It also counts the decisions that cannot BE a `policy_decision` event,
+because `request_id` is `string | number` and these messages have no usable
+id to write one with. Their outcome rides the additive `gateway` field on
+the `notification` event each is recorded as:
+
+- a refused `tools/call` **notification** (no `id` property at all), and
+- a `tools/call` whose `id` is not a usable JSON-RPC id — `null`, but
+  equally `true`, `{}` or `[]` — which is refused with a JSON-RPC `-32600`
+  whatever the policy says, and carries `refusal: 'invalid_request_id'` so
+  the absent `rule_id` is not read as a default deny.
+
+Neither is ever forwarded to the server, and without the `gateway` field
+neither left anything in the chain but a line on stderr.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `decision` | `'deny' \| 'hold'` | The action the policy selected. |
+| `outcome` | `'approved' \| 'denied' \| 'timeout' \| 'cancelled' \| 'session_end'?` | Holds only. `session_end` means the proxy shut down while the call was still held. |
+| `tool` | `string` | Tool name (`gen_ai.tool.name`). Capped exactly like `tool_call.tool`. |
+| `request_id` | `string \| number` | JSON-RPC request id of the call. |
+| `rule_id` | `string?` | Matching rule id (capped identifier); absent when `mcp.default` applied. |
+| `policy_hash` | `Sha256Ref` | SHA-256 of the exact bytes of the policy file in force. |
+| `args_hash` | `Sha256Ref` | `sha256:<hex>` of the canonical JSON of the raw `params.arguments` — never the arguments themselves. |
+| `approval_id` | `string?` | Holds only: the UUID the operator saw in `mcp-recorder holds`. Absent when the call was refused before a hold file ever existed — a hold-matching `tools/call` that arrives while the proxy is already shutting down is recorded as `outcome: 'session_end'` with no approval id. |
+| `waited_ms` | `number?` | Holds only: how long the call was parked. |
+| `approver` | `string?` | Holds only: the OS user that ran `mcp-recorder approve`/`deny`, when the hold file recorded one **as a string**. Capped exactly like any identifier copied off the wire (`structuralString`): a value longer than 128 characters or outside the identifier shape is stored as its `sha256:<hex>` reference, and a non-string `decided_by` is ignored entirely. |
+| `decision_id` | `string?` | Additive, optional (schema stays v1). The id of **this** decision, a uuid: minted by the local policy engine for a decision it took itself, or the control plane's own `decision_id` when a remote credential broker (`credentials[].broker: { kind: remote }`, [docs/policy.md](policy.md#credentialsbroker--resolved-by-the-control-plane)) made it — in which case it equals the `cresec.broker.decision_id` attribute the same call carries, so the two events join on one value. The synthetic `tool_call` written next to a deny carries the same id as `cresec.policy.decision_id`. Absent only on events written before the field existed. |
+| `error_code` | `string?` | Additive, optional (schema stays v1). Set **only** on a fail-closed refusal — one where the gateway could not reach a decision and denied rather than allow the call unchecked — and it names which way it could not: `arguments-too-large-to-scan`, `value-too-long`, `regex-timed-out`, `policy-unevaluable`. `rule_id` is absent on exactly these events, because nothing matched, so without this field `mcp-recorder why` had nothing to say about the most confusing refusal the product produces. The same string appears in the guidance clause the model reads and in the `rule <label>` on the proxy's stderr, so the three sides of one refusal agree. Absent on every ordinary allow / deny / hold, and on events written before the field existed. |
+
+Attributes on a `policy_decision`: `gen_ai.tool.name`, `gen_ai.tool.call.id`,
+`mcp.method.name`, `rpc.system`, `cresec.policy.decision`,
+`cresec.policy.decision_id` (the same value as the `decision_id` field), and
+`cresec.policy.rule_id` when a rule matched. A `tool_call` recorded in gateway
+mode carries the same `cresec.policy.*` attributes next to its usual ones.
+
+`policy_decision` events are written by **both transports** — `record
+--policy` (stdio) and `http --policy` (streamable HTTP) — with the same
+fields. On HTTP a `tools/call` NOTIFICATION the policy refuses is answered
+`202` and recorded on the `notification` event's `gateway` field exactly as
+on stdio; a JSON-RPC batch that carries a refused call is answered locally
+and every refused element gets its own `policy_decision`; an allowed element
+of such a batch is not forwarded either and is recorded as a synthetic
+`tool_call` with `gateway.refusal: 'batch_refused'`.
+A call the gateway refused has `duration_ms: 0` (it never reached the server);
+`waited_ms` carries the hold time, and for a hold that was approved
+`duration_ms` measures from the moment the request was forwarded.
+
+---
+
+## Hook-sourced events (additive)
+
+`mcp-recorder hook` (see [docs/hooks.md](hooks.md)) turns Claude Code
+PreToolUse/PostToolUse/PostToolUseFailure/SessionEnd/Stop hook invocations into events using
+the exact same `session_start` / `tool_call` / `session_end` / `notification`
+shapes above — no new event kind was needed. `Stop` (the end of an agent
+turn, which fires many times per session) becomes a `notification` event
+with `method: 'claude-code/stop'` and `direction: 'client_to_server'`, so
+that a session still has exactly one `session_end` (from `SessionEnd`). Four additive, optional fields distinguish a
+hook-sourced event and its finer shape, none of which change any existing
+field:
+
+- **`EventBase.source: 'hook'`** — set on every event `mcp-recorder hook`
+  emits; undefined on every proxy-captured event.
+- **`ToolCallEvent.phase: 'pre' | 'post'`** — a hook-sourced tool call is two
+  separate, separately-timestamped events (one per hook invocation) sharing
+  one `request_id` (Claude Code's own `tool_use_id`), rather than the single
+  request+response-correlated event the proxy records. `'pre'` carries
+  redacted arguments with `result: null` and `duration_ms: 0`; `'post'`
+  carries the redacted result and the measured `duration_ms` (for a
+  PostToolUseFailure: `result: null`, `result_hash` of canonical `null`,
+  `is_error: true` and `error` as below — Claude Code fires exactly one of
+  PostToolUse / PostToolUseFailure per call). A hook `'post'` event's
+  `duration_ms` is the gap between the two hook invocations (Claude Code's
+  dispatch plus hook process spawn, which can be around a second per
+  call), not the MCP server's latency the proxy measures — see
+  [docs/hooks.md](hooks.md#what-gets-recorded).
+- **`ToolCallEvent.error.type: 'policy_denied' | 'tool_error' | 'interrupted'`**
+  — additive values under the already free-form `error.type` string field
+  (no schema change; the same string is also set as the `error.type`
+  attribute). `'policy_denied'`: `mcp-recorder hook --policy FILE` denied
+  the PreToolUse call; `error.message_ref` is the hash of the policy rule's
+  `reason`. `'tool_error'`: the call failed (Claude Code fired
+  PostToolUseFailure instead of PostToolUse); `error.message_ref` is the
+  hash of the hook's `error` string, computed exactly like any redacted
+  value (`Redactor.hashString`, i.e. `sha256Ref`) — the text itself is
+  never stored. `'interrupted'`: the same, but the hook's `is_interrupt`
+  was true (the call was aborted rather than reporting an error). A
+  PostToolUse event whose `tool_response` is shaped `{isError: true}` (the
+  MCP CallToolResult convention) sets `is_error: true` and the
+  `'tool_error'` *attribute* only, with no `error` object.
+- **`ServerContext.url`** — the endpoint of the MCP server a hook-sourced
+  `tool_call` went to, as the MCP config file the hook found asserts it
+  (see the `ServerContext` table above for the value, its scrubbing and
+  its trust), set on both halves of the call and on nothing else: a
+  session-level event names the client itself, so it carries no vendor
+  URL. `server.name` itself is always what Claude Code calls the server —
+  in a cloud session an opaque UUID like
+  `0e1d2c3b-4a59-4687-9a6b-5c4d3e2f1a0b` —
+  so that it matches Claude Code's own hook matchers and transcripts;
+  `url` is what makes such an event self-describing. Absent when the
+  config file was missing, malformed, oversized, or had no usable URL for
+  that server.
+
+`SessionEndEvent.reason` is a **frozen closed union**
+(`'child_exit' | 'stdin_closed' | 'signal' | 'error'`) with no member for
+either of Claude Code's own `SessionEnd` reasons — additive-only means
+picking the closest *existing* value rather than inventing a new one, so a
+hook-sourced `session_end` reuses `'stdin_closed'` for the hook's own
+`'logout'` reason and `'child_exit'` for everything else (`'clear'`/
+`'resume'`/`'prompt_input_exit'`/`'other'`). `source: 'hook'`
+is what actually distinguishes these from a proxy-captured `session_end` —
+`reason` alone should not be read as "the wrapped process exited" for a
+hook-sourced event.
+
+`ServerContext.transport` stays `'stdio'` for hook-sourced events (the
+closest existing value — a hook invocation is not literally a stdio pipe
+the way `record`'s proxy is, but it is not an HTTP transport either, and the
+union is frozen the same way); `server.name`/`server.command` follow
+[docs/hooks.md](hooks.md#what-gets-recorded)'s own naming (the MCP server a
+tool call went to, or `'claude-code'` for a built-in tool or a session-level
+event).
+
+---
+
+## OpenTelemetry semantic-convention mapping
+
+Field naming aligns with OTel GenAI / RPC semantic conventions where one exists. The
+flat `attributes` bag on every event uses these names directly; the table maps the
+typed event fields to their semconv equivalents.
+
+| Semconv attribute | Recorder source | Notes |
+| --- | --- | --- |
+| `gen_ai.operation.name` | event `kind = 'tool_call'` | `execute_tool` for tool-call events. |
+| `gen_ai.tool.name` | `ToolCallEvent.tool` | The MCP tool invoked. Same capped value as `tool` (see above). |
+| `gen_ai.tool.call.id` | `ToolCallEvent.request_id` | The JSON-RPC request id of the call. |
+| `rpc.system` | constant | `jsonrpc` — MCP is JSON-RPC 2.0. |
+| `rpc.jsonrpc.request_id` | `RpcEvent.request_id`, `InitializeEvent.request_id` | Correlated request id. |
+| `mcp.method.name` | `RpcEvent.method`, `NotificationEvent.method` | e.g. `tools/list`, `resources/read`. Same capped value as `method` (see above). |
+| `error.type` | `error.type` on `tool_call` / `rpc` events | Stable error class; message stored only as `message_ref` hash. `policy_denied` marks a call the gateway refused; `duplicate_id` marks a call refused for reusing a request id that was still in flight, and a request sealed to hand an approved hold its pending slot back. |
+| `cresec.policy.decision` | `PolicyDecisionEvent.decision`, `ToolCallEvent.gateway.decision` | `allow` / `hold` / `deny`. Not an OTel semconv name; namespaced under `cresec.` to say so. |
+| `cresec.policy.rule_id` | `PolicyDecisionEvent.rule_id`, `ToolCallEvent.gateway.rule_id` | The matching `policy.yaml` rule id, when one matched. |
+
+---
+
+## Chain layer
+
+Events are wrapped into the tamper-evident store as **chain records**.
+
+### `ChainRecord`
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `seq` | `number` | 1-based, strictly contiguous. |
+| `prev_hash` | `string` | 64-hex chain hash of the previous record (`GENESIS_HASH` for seq 1). |
+| `hash` | `string` | `sha256_hex(prev_hash + "\n" + canonical_json(event))`. |
+| `event` | `AnyEvent` | The sealed event. |
+
+### Genesis
+
+The chain anchor for seq 1 is the SHA-256 of the constant string
+`cresec.mcp-recorder.genesis.v1`:
+
+```
+GENESIS_HASH = sha256_hex("cresec.mcp-recorder.genesis.v1")
+             = b874fb0f83171f6156e3297dfc49de4b7615a11d6e616904e3159c13a570aedc
+```
+
+### Hash recipe
+
+For each record *n*:
+
+```
+hash_n = sha256_hex( prev_hash + "\n" + canonical_json(event_n) )
+```
+
+where `prev_hash` is `GENESIS_HASH` for `seq = 1` and `hash_{n-1}` otherwise, the
+separator is a single LF (`0x0a`), and all input is UTF-8.
+
+### Head signatures (`HeadSignature`)
+
+The chain head is periodically signed with a local ed25519 key.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `seq` | `number` | The seq of the record whose chain hash was signed. |
+| `chain_hash` | `string` | The chain hash that was signed (64-hex). |
+| `algo` | `'ed25519'` | Signature algorithm. |
+| `public_key` | `string` | 64-hex raw ed25519 public key. |
+| `signature` | `string` | 128-hex raw ed25519 signature over the signed payload below. |
+| `signed_at` | `string` | ISO-8601 UTC. |
+
+The exact bytes signed are domain-separated with the constant string
+`cresec.mcp-recorder.head.v1`, so a head signature can never be confused with any other
+payload:
+
+```
+signed_payload = utf8( "cresec.mcp-recorder.head.v1" + "\n" + seq + "\n" + chain_hash )
+```
+
+with `seq` rendered in decimal and `chain_hash` as 64 lowercase hex characters.
+
+### Canonical JSON rules
+
+`canonical_json` is deterministic JSON serialization:
+
+1. Object keys sorted **lexicographically at every level**.
+2. **No whitespace** anywhere.
+3. `undefined` object values are **dropped** (like `JSON.stringify`).
+4. `undefined` array elements become `null` (like `JSON.stringify`).
+5. Non-finite numbers (`NaN`, `±Infinity`) become `null` (like `JSON.stringify`).
+6. Strings and booleans serialize exactly as `JSON.stringify` (standard JSON string
+   escaping).
+7. `null` and `undefined` values serialize as `null`.
+
+Any independent implementation following these rules over the same event object yields
+byte-identical output, and therefore the same chain hashes — this is what makes the
+standalone `verify.cjs` in an exported bundle possible.
+
+## Governed lifecycle (additive, v1)
+
+`action_lifecycle` is a new event kind with three distinct records per
+completed governed attempt: `phase: intent`, `phase: decision`, and
+`phase: outcome`. It is emitted only when a policy was selected, on stdio,
+HTTP and hooks. Existing `tool_call`, `policy_decision`, hook pre/post and
+notification records remain; their optional correlation fields point to
+this lifecycle. `DECISIONS` still counts legacy refusals/holds, not allows.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `action_id` | `string` | Stable for this action; also optional on legacy records |
+| `attempt_id` | `string` | Stable for this dispatch attempt; also optional on legacy records |
+| `request_hash` | `Sha256Ref?` | Full canonical pre-injection request hash, without depth truncation; also optional on legacy records |
+| `phase` | `intent`, `decision`, `outcome` | One lifecycle stage per record |
+| `tool` | `string` | Capped structural tool name |
+| `request_id` | `string or number?` | Absent for notifications and invalid IDs |
+| `decision` | `allow or deny?` | Final admission, after approval and credential checks; not a success claim |
+| `decision_id` | `string?` | Local/broker decision ID; present on decisions |
+| `policy_hash` | `Sha256Ref?` | Proxy policy fingerprint on decisions |
+| `outcome` | `success, error, denied, unknown?` | Observed response, known refusal, or absence of a known result |
+| `reason` | `string?` | Structural reason, never upstream error text |
+| `record_event_id` | `string?` | Compatible outcome record's event ID |
+
+Proxy actions and attempts use independent UUIDs. Reusing a JSON-RPC ID,
+including a refused duplicate, is a new action; IDs are not an upstream
+idempotency key. No write is retried by the recorder. Hooks derive domain-
+separated hashes from session ID and tool_use_id, joining pre/post across
+processes. Each host dispatch is one attempt. Without tool_use_id the host's
+existing argument-based fallback cannot distinguish identical invocations;
+that surface cannot claim complete correlation. Hook request_hash covers a
+normalized `{method,id,params:{name,arguments}}` envelope, not transcript
+paths or a post callback containing results.
+
+Pending close, lost responses and admitted notifications are `unknown`,
+never success. The compatible unanswered tool_call stays is_error with its
+old error type. An upstream JSON-RPC timeout (-32001) and interrupted hook
+also give unknown. Dead recorder leases now recover durable pending attempts
+as unknown; `test/evidence-fault.test.ts` proves recovery after real process
+termination on both MCP proxy transports. Lifecycle construction
+has no I/O. Its evidence is queued without awaiting append before execution;
+it is not an admission receipt or a durable-intent gate.
+
+Proof: `test/lifecycle.test.ts`, the lifecycle cases in
+`test/gateway-proxy.test.ts`, `test/http-gateway.test.ts`, `test/hook.test.ts`.
+Lifecycle records and the records before them use the same hash recipe,
+genesis, signature payload and `cresec.mcp-recorder.bundle.v1`; no verifier or
+format version change is required. (The identifiers themselves changed once,
+in 0.2.0; see the freeze policy above.) Unknown optional fields/new kinds must be kept
+verbatim by consumers when verifying.
+
+
+## Delivery and coverage (additive, v1)
+
+| Field / record | Contract | Proof / limit |
+| --- | --- | --- |
+| `recorder_run_id` | Optional process incarnation on CLI-captured events | Survives replay; never used as an action ID |
+| `coverage_gap` | New kind, `coverage: incomplete`, `reason`, `dropped_at_least` | Evidence of incomplete coverage, never an execution outcome |
+| Gap reason | `queue_full`, `spool_full`, `spool_unavailable`, `torn_spool`, `recorder_exit` | Count is a lower bound; zero means the number lost is unknown |
+| `event_id` | Stable delivery identifier; duplicates with identical canonical event content append once | Both stores reject same-ID different-content delivery; historical records are not rewritten |
+| Recovery IDs | Domain-separated SHA-256 refs derived from durable event/run IDs | Deterministic across recovery retries; IDs need not all be UUIDs |
+| `reconcile` | Every locally persisted allow with no outcome; unknowns and missing `record_event_id` companions listed separately | Chain plus pending spool snapshot; not a control-plane ledger census |
+
+`test/evidence-coverage.test.ts` proves spool/replay, both-store dedupe,
+concurrency, queue/spool bounds, torn-tail gaps and reconciliation with injected
+in-process failures. `test/evidence-fault.test.ts` adds actual process
+termination and next-process recovery at the checkpoints below.
+
+The CLI wires `DurableDelivery` into `Recorder`. Low-level embedding that
+constructs `Recorder` without its optional delivery adapter retains the
+legacy best-effort behavior and does not satisfy these coverage guarantees.
+The CLI's `record`, `http` and `hook` share `<data-dir>/delivery/pending.jsonl`.
+Its committed frames are append-only; a torn final frame is truncated with a
+gap, never treated as a successful append. Frames are fsynced before store
+append, including when the store was unavailable at startup. A journal is
+acknowledged only after the chain and head signature are synced. SQLite uses
+FULL synchronous transactions; JSONL files are fsynced explicitly. Replay is
+attempted during drains, every second while the recorder is alive, and at
+startup/close. CLI startup schedules this work in the background; recovery
+checks for dead leases before scanning historical records. Acknowledgements
+are counted by originating recorder_run_id, even when another process replays
+the shared journal. Event-ID dedupe covers uncertain acknowledgements, including a
+commit followed by process death before journal removal. Replay never calls
+the upstream tool. Canonical JSON, genesis, signatures and bundle v1 are
+unchanged by delivery and coverage (the identifiers changed once, in 0.2.0,
+for unrelated reasons); integrity verification is not coverage reconciliation.
+
+The shared journal cap is 64 MiB plus an 8 KiB reserve for a saturation gap;
+the memory queue holds at most 4096 events plus a gap counter and one draining
+batch. One oversized event may be dropped. A saturation episode's gap is a
+lower bound across this data directory, not an exact per-session loss count.
+Lease/ticket metadata is separate from the payload cap; dead-run metadata is
+cleaned after recovery. A filesystem bakery lock uses immutable unique
+process tickets, ignoring only known-dead PIDs; this avoids reclaiming a live
+writer because a clock timeout elapsed. Local POSIX/NTFS filesystems with
+coherent directory reads and hardlinks are required; network filesystems are
+not supported. Windows fsyncs files and closes handles before rename/unlink;
+Node cannot fsync Windows directories. Power-loss durability beyond the
+filesystem's guarantees is not claimed.
+
+Close and `reconcile --recover` sweep for missing outcomes. Known-dead run
+leases and ended hook sessions produce `unknown` for unresolved durable
+attempts (`denied` only when a deny decision is already known); a recorder
+exit also leaves a gap with an unknown loss count. A later observed response
+may refine unknown for the same attempt; reconciliation uses its latest
+outcome. PID reuse or permission-denied liveness checks remain unresolved,
+not guessed dead. Hook pre/post processes are intentionally distinct; a clean
+pre close does not declare its host action complete. An undelivered post
+callback needs the hook session-end record or independent reconciliation.
+
+Without a policy, observation is explicitly best effort: gaps expose losses,
+no lifecycle completeness is implied. Gateway mode has the same fail-open
+recording but persisted allow decisions can be reconciled. A gap or missing
+outcome makes coverage incomplete; unknown is an explicit uncertainty, never
+success. Disk failure may prevent persisting even a gap; stderr then reports
+it and a surviving lease can expose the dirty exit on recovery. A crash before
+lease/evidence persistence and control-plane decisions never observed here
+cannot be enumerated locally. Cross-leg action-ID propagation and an independent
+allowed-decision feed are follow-ups for the control plane, not a claim of this local sweep.
+
+
+### Process-fault proof and its limits
+
+| Fault checkpoint (`test/evidence-fault.test.ts`) | Asserted outcome |
+| --- | --- |
+| SQLite transaction after first insert | Rollback plus durable journal replay; each original event ID appears once |
+| JSONL append after one frame and part of the next | Intact prefix retained, torn tail repaired, journal replay restores both IDs exactly once |
+| Commit before journal acknowledgement | Replaying the retained journal adds no duplicate record |
+| Signature append interrupted | Torn signature repaired; journal retained until a new signed head is durable |
+| Journal append interrupted | Intact frames replay; partial frame produces `torn_spool`, not fictitious success |
+| Store unavailable, including next-process startup | Fsynced journal survives termination and replays on recovery |
+| Store recovers while recorder stays alive | Timer drains the journal without new tool traffic |
+| Full bounded journal | Original IDs may be absent; `spool_full` explicitly exposes the loss |
+| Termination before queue drain | Surviving lease produces `recorder_exit` with unknown loss count; no invented action history |
+| Stdio/HTTP gateway terminated with admitted pending write | Same action/attempt recovers as `unknown`; upstream receipt journal remains exactly one call |
+| Upstream JSON-RPC timeout | `unknown`, one upstream execution, never success |
+| Hook session ends without post callback | Its durable allow resolves to `unknown` with the same action ID |
+| Recovery resolves a transient signing failure during close | Recheck current journal state; remove the clean lease, avoiding a false later exit gap |
+| Shipper starts before any async append (`test/e2e/ship.e2e.test.ts`) | Reopen the empty read-only reader when the first evidence file appears; replicate without creating a chain |
+| Repeated recovery and bundle export | Stable event IDs, no duplicates; v1 `verify.cjs` accepts recovered signed evidence offline |
+
+Recovery assertions wait for pending frames and abandoned leases to clear.
+The JSONL store's existing stale-lock grace period can defer replay after a
+termination inside append; reconciliation reports that pending state until
+a subsequent recovery attempt completes. No missing outcome is counted as
+complete during that interval.
+
+The process is forcibly terminated only after a concrete checkpoint file or
+persisted allow is observed. POSIX uses SIGKILL; Node forces termination on
+Windows. Fault hooks live exclusively in test fixtures, with no production
+backdoor or runtime failure flag. SQLite's fixture blocks inside a real
+transaction; JSONL fixtures stop after actual partial writes and fsync. The
+upstream receipt journal is independent of recorder evidence.
+
+This closes the local process-fault proof, not an assertion of lossless
+fail-open execution. Hardware power loss, network filesystems, a lost disk,
+a crash before lease persistence, unobserved control-plane decisions and
+host callbacks that never arrive remain outside that proof. The exact gap
+and independent-reconciliation limits above still apply. Integrity verification
+continues to prove only the records present in the bundle.
