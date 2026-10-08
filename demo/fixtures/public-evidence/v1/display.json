@@ -5,11 +5,11 @@
   "sample": true,
   "mode": "example-observation",
   "actor_status": "unattributed",
-  "generated_at": "2026-10-05T05:45:40.461Z",
+  "generated_at": "2026-10-08T21:54:31.240Z",
   "generator": {
     "command": "npm run demo:sample -- --out <new-directory>",
     "package_version": "0.2.0",
-    "source_base_commit": "2a9a3b4287a1932830c264df29ad07489c97906d",
+    "source_base_commit": "de1e09c9caad12d73419c296c93b80082c908727",
     "source_state": "clean",
     "source_changes": [],
     "source_sha256": {},
@@ -17,8 +17,8 @@
     "node_version": "v22.22.0"
   },
   "signer": {
-    "public_key_hex": "b20bf5314b22cd590388e67fd223c5d22fca2663e73ae2749dff5ecf1dc2da07",
-    "fingerprint_sha256_raw_key": "3cd82472ea4d083df350272188ab2dcb9910e983cf457047e5dc85ee7f3cd02b",
+    "public_key_hex": "9360a9c89cbfae02f96ec81dd8658e48efd33170308a0ce58fb761f3d032c926",
+    "fingerprint_sha256_raw_key": "e5bd739ddd6c65da924c2fb5b5c315041e3220e98d3d31daa61e4f3437717cef",
     "independently_trusted": false
   },
   "range": {
@@ -43,14 +43,14 @@
   ],
   "verification": {
     "kind": "precomputed",
-    "observed_at": "2026-10-05T05:45:40.461Z",
+    "observed_at": "2026-10-08T21:54:31.240Z",
     "verifier": "@cresec/mcp-recorder exported verify.cjs",
     "package_version": "0.2.0",
     "intact": {
       "artifact": "intact/",
       "command": "node intact/verify.cjs",
       "exit_code": 0,
-      "stdout": "PASS: evidence bundle verified\n  events     : 2 (seq 1..2)\n  base hash  : b874fb0f83171f6156e3297dfc49de4b7615a11d6e616904e3159c13a570aedc\n  head hash  : e2bb63eacc306e086cbefa8cfa62a81fdb49d74a8463af686473edef29ea5d51\n  signed by  : ed25519 b20bf5314b22cd590388e67fd223c5d22fca2663e73ae2749dff5ecf1dc2da07 at 2026-10-05T05:45:40.344Z\nEvery event hash recomputes, the chain is contiguous, and the head\nsignature verifies against the bundled public key.\n  key check  : NOT independently verified - the key came from this bundle\n               itself (public_key.pem / manifest.json), which an attacker\n               who forged the whole bundle controls too. Re-run with\n               --public-key <hex|path> using a key you obtained out of band\n               (e.g. from the operator directly) for real assurance.\n\nUNSIGNED metadata (not covered by the signature - informational only):\n  created_at   : 2026-10-05T05:45:40.344Z\n  tool_version : 0.2.0\n",
+      "stdout": "PASS: evidence bundle verified\n  events     : 2 (seq 1..2)\n  base hash  : b874fb0f83171f6156e3297dfc49de4b7615a11d6e616904e3159c13a570aedc\n  head hash  : e2bb63eacc306e086cbefa8cfa62a81fdb49d74a8463af686473edef29ea5d51\n  signed by  : ed25519 9360a9c89cbfae02f96ec81dd8658e48efd33170308a0ce58fb761f3d032c926 at 2026-10-08T21:54:31.141Z\nEvery event hash recomputes, the chain is contiguous, and the head\nsignature verifies against the bundled public key.\n  key check  : NOT independently verified - the key came from this bundle\n               itself (public_key.pem / manifest.json), which an attacker\n               who forged the whole bundle controls too. Re-run with\n               --public-key <hex|path> using a key you obtained out of band\n               (e.g. from the operator directly) for real assurance.\n\nUNSIGNED metadata (not covered by the signature - informational only):\n  created_at   : 2026-10-08T21:54:31.142Z\n  tool_version : 0.2.0\n",
       "stderr": ""
     },
     "tampered": {
@@ -64,15 +64,15 @@
   },
   "artifact_sha256": {
     "intact/events.jsonl": "e5a5ec3a6d422e63b6810afe14fbb01b7eb8097f23a0e2eb61837db339e422e8",
-    "intact/manifest.json": "52b542e485c32e15eb4506bf30c7ac8d95605991e2f8df14c79a916d4b91bb17",
-    "intact/public_key.pem": "464f4ab035764d5f4f005fd526a999fb74018cb80e44c4a83e0b278b86db08c2",
+    "intact/manifest.json": "c7d1bcdffdc8684c37ca59a3bf76bffec204a632af3918caeea35a18a5ff173f",
+    "intact/public_key.pem": "215d4444743aad37bd3519d6c916f4742cff10d106d3e0c3942e91072054f2b8",
     "intact/verify.cjs": "ce2a318563337c3a06b17ec1c436837c4a460b17f6d26581e917dfada5eac3f9",
-    "intact/README.txt": "dcc8ae714569d8f5df038aa51132ffb6bf9cf2698120da9e97d90554dfb1c250",
+    "intact/README.txt": "2711ebdf43659cdbfd54a5c33625d1a5daffa5620088855fecf4694246ebe84f",
     "tampered/events.jsonl": "f62a5d060235a833d1306366767196e71de8cb7800feebde32a29fc2ad879a5f",
-    "tampered/manifest.json": "52b542e485c32e15eb4506bf30c7ac8d95605991e2f8df14c79a916d4b91bb17",
-    "tampered/public_key.pem": "464f4ab035764d5f4f005fd526a999fb74018cb80e44c4a83e0b278b86db08c2",
+    "tampered/manifest.json": "c7d1bcdffdc8684c37ca59a3bf76bffec204a632af3918caeea35a18a5ff173f",
+    "tampered/public_key.pem": "215d4444743aad37bd3519d6c916f4742cff10d106d3e0c3942e91072054f2b8",
     "tampered/verify.cjs": "ce2a318563337c3a06b17ec1c436837c4a460b17f6d26581e917dfada5eac3f9",
-    "tampered/README.txt": "dcc8ae714569d8f5df038aa51132ffb6bf9cf2698120da9e97d90554dfb1c250"
+    "tampered/README.txt": "2711ebdf43659cdbfd54a5c33625d1a5daffa5620088855fecf4694246ebe84f"
   },
   "limitations": [
     "Example bundle generated by npm run demo:sample, not production traffic or a real workflow execution.",

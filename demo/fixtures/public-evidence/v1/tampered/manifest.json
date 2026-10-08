@@ -1,6 +1,6 @@
 {
   "bundle": "cresec.mcp-recorder.bundle.v1",
-  "created_at": "2026-10-05T05:45:40.344Z",
+  "created_at": "2026-10-08T21:54:31.142Z",
   "tool_version": "0.2.0",
   "range": {
     "from_seq": 1,
@@ -13,9 +13,9 @@
     "seq": 2,
     "chain_hash": "e2bb63eacc306e086cbefa8cfa62a81fdb49d74a8463af686473edef29ea5d51",
     "algo": "ed25519",
-    "public_key": "b20bf5314b22cd590388e67fd223c5d22fca2663e73ae2749dff5ecf1dc2da07",
-    "signature": "b1a2b3e301d3b03762b5f8fb97b735222c0fc6a95b16b082e35f3c822474c784752524b66a54d6426461592cfe6ec1938c887b2d4e73afb891d21dbaa9f0700c",
-    "signed_at": "2026-10-05T05:45:40.344Z"
+    "public_key": "9360a9c89cbfae02f96ec81dd8658e48efd33170308a0ce58fb761f3d032c926",
+    "signature": "78aa81e2a8250a6161c4f80687ff78dc4ecc9c002641c2432fc6697e722b6824efda549a09b1b4b0a003a0f0aae453201eff5eb258e0833fe008c48c5a643500",
+    "signed_at": "2026-10-08T21:54:31.141Z"
   },
-  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAsgv1MUsizVkDiOZ/0iPF0i/KJmPnOuJ0nf9ezx3C2gc=\n-----END PUBLIC KEY-----\n"
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAk2CpyJy/rgL5bsgd2GWOSO/TMXAwigzlj7dh89AyySY=\n-----END PUBLIC KEY-----\n"
 }
