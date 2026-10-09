@@ -8,9 +8,11 @@ behind the tool, see the [README](../README.md); for the event format, see
 **The short version.** Two typed commands and one client restart:
 
 ```sh
-npm install -g @cresec/mcp-recorder
+npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
 mcp-recorder protect --client claude-code
 ```
+
+Not yet published to npm: this installs a pinned commit from GitHub.
 
 Then fully quit and restart your client and ask your agent to do something it
 should not. Everything after the [one-command way](#the-one-command-way-mcp-recorder-protect)
@@ -29,10 +31,11 @@ is for people who want to know what that did, or who need to do it by hand.
 
 ## Install the CLI
 
-Install the package globally from npm:
+Install the package globally. It is not yet published to npm, so install a
+pinned commit from GitHub:
 
 ```sh
-npm install -g @cresec/mcp-recorder
+npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
 ```
 
 It must be a global install, not `npx`: `protect` and `setup` write the path
@@ -46,7 +49,7 @@ Without it the recorder still works — it falls back to the JSONL store and
 says so once on stderr — but to get SQLite, allow the script:
 
 ```sh
-npm install -g --allow-scripts=better-sqlite3 @cresec/mcp-recorder
+npm install -g --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
 ```
 
 (or `npm config set allow-scripts=better-sqlite3 --location=user` once, for
@@ -236,7 +239,8 @@ mcp-recorder setup --client <claude-desktop|claude-code|cursor> [--config PATH] 
     see](#connectors-what-the-recorder-can-and-cannot-see) below.
 - `--wrapper local` (the default) points at this Node binary and this
   install's `dist/cli.js` by absolute path. `--wrapper npx` writes the
-  `npx -y @cresec/mcp-recorder` form. `--wrapper
+  `npx -y @cresec/mcp-recorder` form; it is refused until the package is
+  published to npm, because the client could not start that entry. `--wrapper
   wsl` writes a `wsl.exe -e node ...` form so a **Windows** client can launch
   a server that actually runs inside **WSL**; from inside WSL, `setup`
   auto-selects it for you whenever the resolved config is a Windows-side
@@ -274,7 +278,8 @@ below — it produces the same result.
 ### Manual JSON edit, per client
 
 In every case, pick the local-wrapper form (points at your global
-install) or the npx form.
+install) or the npx form. The npx form needs the package on npm, which it is
+not yet; use the local-wrapper form until then.
 Change **only** the `command`/`args` of the server you're wrapping; leave
 `env` and everything else as-is.
 
@@ -433,7 +438,7 @@ Run everything on the Windows side; WSL doesn't come into it at all.
 2. In **PowerShell**:
 
    ```powershell
-   npm install -g @cresec/mcp-recorder
+   npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
    mcp-recorder setup --client claude-desktop --dry-run
    mcp-recorder setup --client claude-desktop
    ```
@@ -630,9 +635,9 @@ Code — with a prompt like this. Copy it in as-is:
 Install @cresec/mcp-recorder and put its starter policy in front of my MCP
 servers.
 
-1. Install it globally from npm (not with npx: the client config will point
-   at the installed copy):
-   npm install -g @cresec/mcp-recorder
+1. Install it globally from GitHub (it is not yet published to npm; not with
+   npx: the client config will point at the installed copy):
+   npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
    Confirm with: mcp-recorder --version
 
 2. Run `mcp-recorder protect --client <claude-desktop|claude-code|cursor> --dry-run`
@@ -819,7 +824,7 @@ troubleshooting notes — see [Windows and WSL](#windows-and-wsl).
 ## Cloud coding agents
 
 Each platform installs dependencies through its own setup step. Point that
-step at `npm install -g @cresec/mcp-recorder`, or, in a checkout of this
+step at `npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e`, or, in a checkout of this
 repository, at `sh scripts/bootstrap.sh`. Where a platform lets a repository
 declare MCP servers, wrap each one with `mcp-recorder record`, the same way a
 local client config does.

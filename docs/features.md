@@ -840,7 +840,7 @@ re-authorises through the bridge.
 **Experimental.** The config rewriting:
 
 ```
-$ node dist/cli.js setup --config client-config.json --bridge clickup=https://mcp.clickup.com/mcp --wrapper npx --dry-run
+$ node dist/cli.js setup --config client-config.json --bridge clickup=https://mcp.clickup.com/mcp --wrapper npx --dry-run   # once the package is on npm; until then --wrapper npx is refused
 wrapped 3 server(s):
   ...                                      (the two pre-existing entries, trimmed)
   clickup: npx "-y" "@cresec/mcp-recorder" "record" "--name" "clickup" "--" "npx" "-y" "mcp-remote" "https://mcp.clickup.com/mcp"

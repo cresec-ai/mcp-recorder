@@ -9,10 +9,11 @@ hash-chained, signed log you can verify offline and hand to someone else.
 ## Install
 
 ```sh
-npm install -g @cresec/mcp-recorder
+npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
 mcp-recorder protect --client claude-code
 ```
 
+Not yet published to npm: this installs a pinned commit from GitHub.
 It must be a global install, not `npx`: the client config points at the
 installed copy, and npx's cache can be deleted under it.
 
@@ -98,7 +99,7 @@ and on Windows with Node 22 ([.github/workflows/ci.yml](.github/workflows/ci.yml
    `--data-dir` / `MCP_RECORDER_DATA_DIR`), for example
    `mv ~/.mcp-recorder ~/.mcp-recorder-pre-0.2.0`. Stores written before
    0.2.0 are not supported by 0.2.0; they verify with the version that wrote them.
-4. `npm install -g @cresec/mcp-recorder`
+4. `npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e`
 5. `mcp-recorder protect --client <C>`
 
 ## Links

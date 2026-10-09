@@ -43,9 +43,11 @@ credential swaps, CI.
 ## 0. Install (1 minute)
 
 ```sh
-npm install -g @cresec/mcp-recorder
+npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
 mcp-recorder --version
 ```
+
+Not yet published to npm: this installs a pinned commit from GitHub.
 
 See [docs/install.md](install.md) for the other install routes and the
 Windows/WSL notes.
@@ -261,7 +263,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - run: npm install -g @cresec/mcp-recorder
+      - run: npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e  # not yet on npm
       - name: Validate the agent policy
         run: mcp-recorder policy validate .agent/policy.ci.yaml
       - name: Run the agent behind the gateway
