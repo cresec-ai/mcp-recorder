@@ -275,7 +275,8 @@ Flags:
                    hook / hook install: logical client name stamped on events
                    (default 'claude-code')
   --config PATH   setup: config file to edit (overrides --client's default)
-  --wrapper W     setup: local (default, this install) | npx (published form) |
+  --wrapper W     setup: local (default, this install) | npx (npm form; refused
+                   until the package is on npm) |
                    wsl (wsl.exe, auto-selected for a Windows-side config in WSL)
   --only N,...    setup: wrap only these server names
   --except N,...  setup: wrap every server except these names
@@ -2013,7 +2014,29 @@ function refuseNpxCacheInstall(what, flags, writesLocalPath) {
     if (!cliPath.split(/[\\/]/).includes('_npx'))
         return false;
     diag(`error: ${what}: this copy runs from npx's temporary cache (${cliPath}), which npm deletes; a config pointing there would stop working.`);
-    diag('  npm install -g @cresec/mcp-recorder, then mcp-recorder protect --client <claude-desktop|claude-code|cursor>');
+    diag(`  ${GITHUB_INSTALL}, then mcp-recorder protect --client <claude-desktop|claude-code|cursor>`);
+    process.exitCode = 2;
+    return true;
+}
+/** The install line while the package is not on npm. The README pins a commit. */
+const GITHUB_INSTALL = 'npm install -g git+https://github.com/cresec-ai/mcp-recorder.git (not yet published to npm; the README pins a commit)';
+/**
+ * Whether @cresec/mcp-recorder is on the npm registry. While it is not,
+ * `--wrapper npx` would write `npx -y @cresec/mcp-recorder` into a client
+ * config, and the client would fail to start every wrapped server. Set it to
+ * true in the release that publishes the package.
+ */
+const PUBLISHED_TO_NPM = false;
+/**
+ * Refuse `--wrapper npx` while the package is not on npm. Runs before
+ * anything is written, `protect`'s starter policy included. Undo is
+ * unaffected. Returns true (and sets exit 2) when it refused.
+ */
+function refuseUnpublishedNpxWrapper(what, flags) {
+    if (PUBLISHED_TO_NPM || flags.undo === true || asStr(flags.wrapper) !== 'npx')
+        return false;
+    diag(`error: ${what}: --wrapper npx writes 'npx -y @cresec/mcp-recorder' into the client config, and @cresec/mcp-recorder is not published to npm yet, so the client could not start it.`);
+    diag(`  Use --wrapper local (the default) from a global install: ${GITHUB_INSTALL}`);
     process.exitCode = 2;
     return true;
 }
@@ -2200,6 +2223,8 @@ function warnLocalScopeServers(hookInstalled) {
 async function cmdSetup(flags) {
     guardStdoutEpipe();
     if (refuseNpxCacheInstall('setup', flags, asStr(flags.wrapper) !== 'npx'))
+        return;
+    if (refuseUnpublishedNpxWrapper('setup', flags))
         return;
     const clientFlag = asStr(flags['client']);
     if (clientFlag !== undefined && !isClientKind(clientFlag)) {
@@ -2636,6 +2661,8 @@ async function cmdProtect(flags) {
     // protect installs the Claude Code hook with this install's path; for the
     // other clients `--wrapper npx` writes no local path at all.
     if (refuseNpxCacheInstall('protect', flags, asStr(flags.wrapper) !== 'npx' || asStr(flags.client) === 'claude-code'))
+        return;
+    if (refuseUnpublishedNpxWrapper('protect', flags))
         return;
     const clientFlag = asStr(flags.client);
     if (clientFlag !== undefined && !isClientKind(clientFlag)) {

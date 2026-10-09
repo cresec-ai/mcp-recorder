@@ -362,7 +362,7 @@ describe('mcp-recorder setup', () => {
     expect(remote).toBeDefined();
   }, 30_000);
 
-  it('--wrapper npx produces exactly the published-package form the README documents', async () => {
+  it('--wrapper npx is refused while the package is not on npm, and the config is untouched', async () => {
     const dir = tmpDir('mcp-rec-setup-npx-');
     const configPath = writeConfig(dir, 'config.json', {
       mcpServers: {
@@ -372,26 +372,26 @@ describe('mcp-recorder setup', () => {
         },
       },
     });
+    const before = readFileSync(configPath, 'utf8');
 
     const res = await runCli(['setup', '--config', configPath, '--wrapper', 'npx', '--json']);
-    expect(res.code).toBe(0);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain('not published to npm yet');
+    expect(res.stderr).toContain('--wrapper local');
+    expect(readFileSync(configPath, 'utf8')).toBe(before);
+    expect(readdirSync(dir)).toEqual(['config.json']);
+  }, 30_000);
 
-    const updated = JSON.parse(readFileSync(configPath, 'utf8')) as { mcpServers: Record<string, ServerEntry> };
-    expect(updated.mcpServers.filesystem).toEqual({
-      command: 'npx',
-      args: [
-        '-y',
-        '@cresec/mcp-recorder',
-        'record',
-        '--name',
-        'filesystem',
-        '--',
-        'npx',
-        '-y',
-        '@modelcontextprotocol/server-filesystem',
-        '/tmp',
-      ],
+  it('protect --wrapper npx is refused before the starter policy is written', async () => {
+    const dir = tmpDir('mcp-rec-protect-npx-');
+    const configPath = writeConfig(dir, 'config.json', {
+      mcpServers: { filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'] } },
     });
+    const dataDir = join(dir, 'data');
+    const res = await runCli(['protect', '--config', configPath, '--wrapper', 'npx', '--data-dir', dataDir]);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain('not published to npm yet');
+    expect(existsSync(dataDir)).toBe(false);
   }, 30_000);
 
   it('--dry-run prints the plan and exits 0 without writing anything', async () => {
@@ -1624,8 +1624,6 @@ describe('mcp-recorder setup --bridge (via the CLI)', () => {
       'setup',
       '--config',
       configPath,
-      '--wrapper',
-      'npx',
       '--bridge',
       `clickup=${CLICKUP_URL}`,
       '--dry-run',
@@ -1641,8 +1639,6 @@ describe('mcp-recorder setup --bridge (via the CLI)', () => {
       'setup',
       '--config',
       configPath,
-      '--wrapper',
-      'npx',
       '--bridge',
       `clickup=${CLICKUP_URL}`,
       '--dry-run',
@@ -1667,8 +1663,6 @@ describe('mcp-recorder setup --bridge (via the CLI)', () => {
       'setup',
       '--config',
       configPath,
-      '--wrapper',
-      'npx',
       '--bridge',
       `clickup=${CLICKUP_URL}`,
       '--json',
@@ -1681,21 +1675,12 @@ describe('mcp-recorder setup --bridge (via the CLI)', () => {
     const written = JSON.parse(readFileSync(configPath, 'utf8')) as {
       mcpServers: Record<string, WrapServerEntry>;
     };
-    expect(written.mcpServers.clickup).toEqual({
-      command: 'npx',
-      args: [
-        '-y',
-        '@cresec/mcp-recorder',
-        'record',
-        '--name',
-        'clickup',
-        '--',
-        'npx',
-        '-y',
-        'mcp-remote',
-        CLICKUP_URL,
-      ],
-    });
+    // The default local wrapper: this checkout's node and dist/cli.js.
+    const clickup = written.mcpServers.clickup!;
+    expect(Object.keys(clickup).sort()).toEqual(['args', 'command']);
+    expect(typeof clickup.command).toBe('string');
+    expect(samePath(clickup.args![0]!, join(ROOT, 'dist', 'cli.js'))).toBe(true);
+    expect(clickup.args!.slice(1)).toEqual(['record', '--name', 'clickup', '--', 'npx', '-y', 'mcp-remote', CLICKUP_URL]);
 
     // sidecar stores the unwrapped mcp-remote entry as the "original"
     const sidecar = JSON.parse(readFileSync(sidecarFor(configPath), 'utf8')) as {
