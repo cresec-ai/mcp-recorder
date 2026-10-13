@@ -8,9 +8,14 @@ behind the tool, see the [README](../README.md); for the event format, see
 **The short version.** Two typed commands and one client restart:
 
 ```sh
-npm install -g @cresec/mcp-recorder
+npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a
 mcp-recorder protect --client claude-code
 ```
+
+Not yet published to npm: this installs a pinned commit from GitHub, which
+needs git. `--allow-git=root` lets npm 12 fetch it (npm 12 refuses git
+installs by default), and `--allow-scripts=better-sqlite3` lets it build the
+SQLite binding; npm 10 and 11 accept both flags.
 
 Then fully quit and restart your client and ask your agent to do something it
 should not. Everything after the [one-command way](#the-one-command-way-mcp-recorder-protect)
@@ -19,6 +24,8 @@ is for people who want to know what that did, or who need to do it by hand.
 ## Requirements
 
 - **Node.js >= 22.** Check with `node --version`.
+- **git**, while the package is installed from GitHub (it is not yet
+  published to npm). Check with `git --version`.
 - **macOS, Linux, or Windows** — Windows is supported natively (CI-tested on
   `windows-latest`): the proxy resolves `.cmd`/`.bat` shims (like `npx`)
   through `cmd.exe` itself, no shell required in your config. Running
@@ -29,28 +36,25 @@ is for people who want to know what that did, or who need to do it by hand.
 
 ## Install the CLI
 
-Install the package globally from npm:
+Install the package globally. It is not yet published to npm, so install a
+pinned commit from GitHub:
 
 ```sh
-npm install -g @cresec/mcp-recorder
+npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a
 ```
 
 It must be a global install, not `npx`: `protect` and `setup` write the path
 of the installed copy into your client's config, and npx's cache can be
 deleted under it.
 
-**npm 11 (the npm that ships with Node 24) and the SQLite backend.** npm 11
-refuses to run a dependency's install script on a global install unless you
-allow it, and better-sqlite3 needs its script to fetch the native binding.
-Without it the recorder still works — it falls back to the JSONL store and
-says so once on stderr — but to get SQLite, allow the script:
-
-```sh
-npm install -g --allow-scripts=better-sqlite3 @cresec/mcp-recorder
-```
-
-(or `npm config set allow-scripts=better-sqlite3 --location=user` once, for
-every future global install). npm 10 runs the script without being asked.
+**npm 12 and the SQLite backend.** npm 12 refuses to run a dependency's
+install script on a global install unless you allow it, and better-sqlite3
+needs its script to fetch the native binding; that is what
+`--allow-scripts=better-sqlite3` in the line above is for. Without it the
+recorder still works — it falls back to the JSONL store and says so once on
+stderr. npm 10 and 11 run the script without being asked (npm 11 prints a
+notice) and accept the flag. `npm config set allow-scripts=better-sqlite3
+--location=user` once does the same for every future global install.
 
 Confirm it worked:
 
@@ -236,7 +240,8 @@ mcp-recorder setup --client <claude-desktop|claude-code|cursor> [--config PATH] 
     see](#connectors-what-the-recorder-can-and-cannot-see) below.
 - `--wrapper local` (the default) points at this Node binary and this
   install's `dist/cli.js` by absolute path. `--wrapper npx` writes the
-  `npx -y @cresec/mcp-recorder` form. `--wrapper
+  `npx -y @cresec/mcp-recorder` form; it is refused until the package is
+  published to npm, because the client could not start that entry. `--wrapper
   wsl` writes a `wsl.exe -e node ...` form so a **Windows** client can launch
   a server that actually runs inside **WSL**; from inside WSL, `setup`
   auto-selects it for you whenever the resolved config is a Windows-side
@@ -274,7 +279,8 @@ below — it produces the same result.
 ### Manual JSON edit, per client
 
 In every case, pick the local-wrapper form (points at your global
-install) or the npx form.
+install) or the npx form. The npx form needs the package on npm, which it is
+not yet; use the local-wrapper form until then.
 Change **only** the `command`/`args` of the server you're wrapping; leave
 `env` and everything else as-is.
 
@@ -428,12 +434,13 @@ per-server (`--only`/`--except`).
 
 Run everything on the Windows side; WSL doesn't come into it at all.
 
-1. Install Node.js >= 22 on Windows (from [nodejs.org](https://nodejs.org) or
-   `winget install OpenJS.NodeJS.LTS`).
+1. Install Node.js >= 22 and git on Windows (from [nodejs.org](https://nodejs.org)
+   and [git-scm.com](https://git-scm.com), or `winget install OpenJS.NodeJS.LTS`
+   and `winget install Git.Git`).
 2. In **PowerShell**:
 
    ```powershell
-   npm install -g @cresec/mcp-recorder
+   npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a
    mcp-recorder setup --client claude-desktop --dry-run
    mcp-recorder setup --client claude-desktop
    ```
@@ -630,9 +637,9 @@ Code — with a prompt like this. Copy it in as-is:
 Install @cresec/mcp-recorder and put its starter policy in front of my MCP
 servers.
 
-1. Install it globally from npm (not with npx: the client config will point
-   at the installed copy):
-   npm install -g @cresec/mcp-recorder
+1. Install it globally from GitHub (it is not yet published to npm; not with
+   npx: the client config will point at the installed copy):
+   npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a
    Confirm with: mcp-recorder --version
 
 2. Run `mcp-recorder protect --client <claude-desktop|claude-code|cursor> --dry-run`
@@ -819,7 +826,7 @@ troubleshooting notes — see [Windows and WSL](#windows-and-wsl).
 ## Cloud coding agents
 
 Each platform installs dependencies through its own setup step. Point that
-step at `npm install -g @cresec/mcp-recorder`, or, in a checkout of this
+step at `npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a`, or, in a checkout of this
 repository, at `sh scripts/bootstrap.sh`. Where a platform lets a repository
 declare MCP servers, wrap each one with `mcp-recorder record`, the same way a
 local client config does.

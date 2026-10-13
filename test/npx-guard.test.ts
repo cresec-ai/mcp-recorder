@@ -56,7 +56,7 @@ describe('installing from the npx cache', () => {
       const r = run(cli, project, [...args, '--data-dir', dataDir]);
       expect(r.status, r.stderr).toBe(2);
       expect(r.stderr).toContain("npx's temporary cache");
-      expect(r.stderr).toContain('npm install -g @cresec/mcp-recorder, then mcp-recorder protect');
+      expect(r.stderr).toContain('npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git (needs git; not yet published to npm; the README pins a commit), then mcp-recorder protect');
       expect(readFileSync(join(project, '.mcp.json'), 'utf8')).toBe(before);
       expect(existsSync(join(project, '.claude'))).toBe(false);
       expect(existsSync(dataDir)).toBe(false);
@@ -70,15 +70,24 @@ describe('installing from the npx cache', () => {
     expect(r.stderr).not.toContain("npx's temporary cache");
   }, 60_000);
 
+  it('hook install --command mcp-recorder hook --dry-run writes no local path and is not refused', () => {
+    const { cli, project, dataDir } = npxLayout();
+    const r = run(cli, project, ['hook', 'install', '--command', 'mcp-recorder hook', '--dry-run', '--data-dir', dataDir]);
+    expect(r.stderr).not.toContain("npx's temporary cache");
+  }, 60_000);
+
+  // --wrapper npx writes no local path, so the cache guard lets it through;
+  // while the package is not on npm the wrapper itself is refused instead.
   for (const args of [
     ['setup', '--client', 'claude-code', '--wrapper', 'npx', '--dry-run'],
-    ['hook', 'install', '--command', 'mcp-recorder hook', '--dry-run'],
     ['protect', '--client', 'cursor', '--wrapper', 'npx', '--dry-run'],
   ]) {
-    it(`${args.join(' ')} writes no local path and is not refused`, () => {
+    it(`${args.join(' ')} passes the cache guard and is refused as unpublished`, () => {
       const { cli, project, dataDir } = npxLayout();
       const r = run(cli, project, [...args, '--data-dir', dataDir]);
       expect(r.stderr).not.toContain("npx's temporary cache");
+      expect(r.status, r.stderr).toBe(2);
+      expect(r.stderr).toContain('not published to npm yet');
     }, 60_000);
   }
 

@@ -9,9 +9,14 @@ hash-chained, signed log you can verify offline and hand to someone else.
 ## Install
 
 ```sh
-npm install -g @cresec/mcp-recorder
+npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a
 mcp-recorder protect --client claude-code
 ```
+
+Not yet published to npm: this installs a pinned commit from GitHub, which
+needs git. `--allow-git=root` lets npm 12 fetch it (npm 12 refuses git
+installs by default), and `--allow-scripts=better-sqlite3` lets it build the
+SQLite binding; npm 10 and 11 accept both flags.
 
 It must be a global install, not `npx`: the client config points at the
 installed copy, and npx's cache can be deleted under it.
@@ -98,7 +103,7 @@ and on Windows with Node 22 ([.github/workflows/ci.yml](.github/workflows/ci.yml
    `--data-dir` / `MCP_RECORDER_DATA_DIR`), for example
    `mv ~/.mcp-recorder ~/.mcp-recorder-pre-0.2.0`. Stores written before
    0.2.0 are not supported by 0.2.0; they verify with the version that wrote them.
-4. `npm install -g @cresec/mcp-recorder`
+4. `npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a`
 5. `mcp-recorder protect --client <C>`
 
 ## Links
