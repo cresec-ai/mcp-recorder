@@ -43,11 +43,14 @@ credential swaps, CI.
 ## 0. Install (1 minute)
 
 ```sh
-npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
+npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a
 mcp-recorder --version
 ```
 
-Not yet published to npm: this installs a pinned commit from GitHub.
+Not yet published to npm: this installs a pinned commit from GitHub, which
+needs git. `--allow-git=root` lets npm 12 fetch it (npm 12 refuses git
+installs by default), and `--allow-scripts=better-sqlite3` lets it build the
+SQLite binding; npm 10 and 11 accept both flags.
 
 See [docs/install.md](install.md) for the other install routes and the
 Windows/WSL notes.
@@ -263,7 +266,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - run: npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e  # not yet on npm
+      - run: npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a  # not yet on npm
       - name: Validate the agent policy
         run: mcp-recorder policy validate .agent/policy.ci.yaml
       - name: Run the agent behind the gateway

@@ -82,11 +82,15 @@ check](#4-the-invariant-check).
 Two commands, one client restart, then one sentence to their agent.
 
 ```sh
-npm install -g git+https://github.com/cresec-ai/mcp-recorder.git#85afcd81132e09e12a47e36f09a3880dee191a4e
+npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git#554d757bae8ffcedc89bc84860493e8e92be322a
 mcp-recorder protect --client claude-code
 ```
 
-Not yet published to npm: this installs a pinned commit from GitHub.
+Not yet published to npm: this installs a pinned commit from GitHub, which
+needs git. `--allow-git=root` lets npm 12 fetch it (npm 12 refuses git
+installs by default), and `--allow-scripts=better-sqlite3` lets it build the
+SQLite binding; npm 10 and 11 accept both flags.
+
 It is a global install, not `npx`: the client config points at the installed
 copy, and npx's cache can be deleted under it.
 
