@@ -382,6 +382,38 @@ describe('mcp-recorder setup', () => {
     expect(readdirSync(dir)).toEqual(['config.json']);
   }, 30_000);
 
+  it('setup --undo --wrapper npx still runs: undo only removes entries', async () => {
+    const dir = tmpDir('mcp-rec-setup-npx-undo-');
+    const configPath = writeConfig(dir, 'config.json', {
+      mcpServers: { filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'] } },
+    });
+    const wrap = await runCli(['setup', '--config', configPath, '--json']);
+    expect(wrap.code, wrap.stderr).toBe(0);
+
+    const undo = await runCli(['setup', '--config', configPath, '--undo', '--wrapper', 'npx', '--json']);
+    expect(undo.code, undo.stderr).toBe(0);
+    expect(undo.stderr).not.toContain('not published to npm yet');
+    const restored = JSON.parse(readFileSync(configPath, 'utf8')) as { mcpServers: Record<string, ServerEntry> };
+    expect(restored.mcpServers.filesystem).toEqual({
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+    });
+  }, 30_000);
+
+  it('protect --undo --wrapper npx is refused too: protect has no undo, so nothing is exempt', async () => {
+    const dir = tmpDir('mcp-rec-protect-npx-undo-');
+    const configPath = writeConfig(dir, 'config.json', {
+      mcpServers: { filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'] } },
+    });
+    const before = readFileSync(configPath, 'utf8');
+    const dataDir = join(dir, 'data');
+    const res = await runCli(['protect', '--config', configPath, '--undo', '--wrapper', 'npx', '--data-dir', dataDir]);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain('not published to npm yet');
+    expect(existsSync(dataDir)).toBe(false);
+    expect(readFileSync(configPath, 'utf8')).toBe(before);
+  }, 30_000);
+
   it('protect --wrapper npx is refused before the starter policy is written', async () => {
     const dir = tmpDir('mcp-rec-protect-npx-');
     const configPath = writeConfig(dir, 'config.json', {

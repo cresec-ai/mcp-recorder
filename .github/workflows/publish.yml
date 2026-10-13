@@ -43,6 +43,15 @@ jobs:
             *"github.com/${GITHUB_REPOSITORY}.git"|*"github.com/${GITHUB_REPOSITORY}") ;;
             *) echo "package.json repository.url (${repo_url}) does not name ${GITHUB_REPOSITORY}"; exit 1 ;;
           esac
+      - name: The not-yet-on-npm guard and copy are gone
+        # While the package was unpublished, the CLI refused --wrapper npx
+        # (PUBLISHED_TO_NPM) and the docs installed a pinned GitHub commit.
+        # A publish that still carries either would ship a CLI and docs that
+        # say the package is not on npm.
+        shell: bash
+        run: |
+          grep -q '^const PUBLISHED_TO_NPM = true;' src/cli.ts || { echo "src/cli.ts: set PUBLISHED_TO_NPM = true in the release that publishes"; exit 1; }
+          if git grep -n -i 'not yet published to npm' -- README.md docs src; then echo "remove the not-yet-published copy above before publishing"; exit 1; fi
       - name: Install dependencies
         run: npm ci
       - name: dist/ is committed and current

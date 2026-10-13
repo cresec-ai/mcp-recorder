@@ -56,7 +56,7 @@ describe('installing from the npx cache', () => {
       const r = run(cli, project, [...args, '--data-dir', dataDir]);
       expect(r.status, r.stderr).toBe(2);
       expect(r.stderr).toContain("npx's temporary cache");
-      expect(r.stderr).toContain('npm install -g git+https://github.com/cresec-ai/mcp-recorder.git (not yet published to npm; the README pins a commit), then mcp-recorder protect');
+      expect(r.stderr).toContain('npm install -g --allow-git=root --allow-scripts=better-sqlite3 git+https://github.com/cresec-ai/mcp-recorder.git (needs git; not yet published to npm; the README pins a commit), then mcp-recorder protect');
       expect(readFileSync(join(project, '.mcp.json'), 'utf8')).toBe(before);
       expect(existsSync(join(project, '.claude'))).toBe(false);
       expect(existsSync(dataDir)).toBe(false);
